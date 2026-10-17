@@ -17,7 +17,7 @@ const KEY = 'test-key';
 async function setup(defs, settings = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sr-'));
   const mocks = [];
-  for (const d of defs) mocks.push(await createMock(d.name, d.behavior).start());
+  for (const d of defs) mocks.push(await createMock(d.name, d.behavior, d.models).start());
   const providers = mocks.map((m, i) => ({ id: m.name, name: m.name, baseUrl: m.url, apiKey: 'k-' + m.name, ...(defs[i].provider || {}) }));
   fs.writeFileSync(
     path.join(dir, 'config.json'),
@@ -37,10 +37,10 @@ async function setup(defs, settings = {}) {
   };
 }
 
-async function send(base, body, { key = KEY, path: p = '/v1/messages' } = {}) {
+async function send(base, body, { key = KEY, path: p = '/v1/messages', ua = 'claude-cli/test' } = {}) {
   const r = await fetch(base + p, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'user-agent': 'claude-cli/test' },
+    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'user-agent': ua },
     body: JSON.stringify(body),
   });
   const text = await r.text();
@@ -52,6 +52,124 @@ async function send(base, body, { key = KEY, path: p = '/v1/messages' } = {}) {
 }
 
 const simple = (extra) => ({ model: 'claude-sonnet-5', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }], ...extra });
+
+async function listModels(t) {
+  const r = await fetch(t.base + '/v1/models', { headers: { 'x-api-key': KEY } });
+  assert.equal(r.status, 200);
+  return r.json();
+}
+
+test('model catalog unions enabled providers, deduplicates by priority and encodes attribution', async () => {
+  const t = await setup([
+    { name: 'A', provider: { name: '优先 @ 0.3x', authHeader: 'both', extraHeaders: { 'x-discovery': 'yes' } }, models: ['shared', 'only-a'], behavior: ok },
+    { name: 'B', models: ['shared', 'only-b'], behavior: ok },
+    { name: 'C', provider: { enabled: false }, models: ['disabled'], behavior: ok },
+  ]);
+  try {
+    const catalog = await listModels(t);
+    // ids stay official so client capability lookups (effort levels) still match
+    assert.deepEqual(catalog.data.map((m) => m.id), ['shared', 'only-a', 'only-b']);
+    assert.deepEqual(catalog.data.map((m) => m.display_name), ['shared (优先 @ 0.3x)', 'only-a (优先 @ 0.3x)', 'only-b (B)']);
+    assert.equal(catalog.has_more, false);
+    assert.equal(catalog.first_id, 'shared');
+    assert.equal(catalog.last_id, 'only-b');
+    assert.ok(catalog.data.every((m) => m.type === 'model' && m.display_name && m.created_at));
+    assert.equal(t.m.C.modelCalls.length, 0);
+    const headers = t.m.A.modelCalls[0].headers;
+    assert.equal(headers.authorization, 'Bearer k-A');
+    assert.equal(headers['x-api-key'], 'k-A');
+    assert.equal(headers['x-discovery'], 'yes');
+    await listModels(t);
+    assert.equal(t.m.A.modelCalls.length, 1, 'fresh catalogs are cached');
+    t.app.config.moveProvider('B', 'up');
+    assert.equal((await listModels(t)).data[0].display_name, 'shared (B)');
+    t.app.config.upsertProvider({ id: 'A', enabled: false });
+    assert.deepEqual((await listModels(t)).data.map((m) => m.display_name), ['shared (B)', 'only-b (B)']);
+  } finally { await t.close(); }
+});
+
+test('suffixed and plain messages skip providers known to lack a model; count_tokens strips suffix too', async () => {
+  const t = await setup([
+    { name: 'A', models: ['other'], behavior: ok },
+    { name: 'B', models: ['wanted'], behavior: (c) => c.path.endsWith('/count_tokens') ? { json: { input_tokens: 7 } } : ok(c) },
+  ]);
+  try {
+    for (const model of ['wanted@provider=A', 'wanted']) {
+      const r = await send(t.base, simple({ model }));
+      assert.equal(r.provider, 'B');
+      assert.equal(t.m.B.calls.at(-1).body.model, 'wanted');
+    }
+    const count = await send(t.base, simple({ model: 'wanted@provider=B' }), { path: '/v1/messages/count_tokens' });
+    assert.equal(count.json.input_tokens, 7);
+    assert.equal(t.m.B.calls.at(-1).body.model, 'wanted');
+    assert.equal(t.m.A.calls.length, 0);
+  } finally { await t.close(); }
+});
+
+test('attribution does not pin routing and filtered candidates still fail over', async () => {
+  const t = await setup([
+    { name: 'A', models: ['wanted'], behavior: () => err(503, 'api_error', 'model_not_found: wanted') },
+    { name: 'B', models: ['wanted'], behavior: ok },
+  ]);
+  try {
+    const r = await send(t.base, simple({ model: 'wanted@provider=B' }));
+    assert.equal(r.provider, 'B');
+    assert.equal(t.m.A.calls.length, 1, 'priority provider tried despite B attribution');
+    assert.equal(t.m.A.calls[0].body.model, 'wanted');
+    assert.equal(t.m.B.calls[0].body.model, 'wanted');
+  } finally { await t.close(); }
+});
+
+test('pinned provider falls through only when catalog rules out the requested model', async () => {
+  const t = await setup([
+    { name: 'A', models: ['wanted'], behavior: ok },
+    { name: 'B', models: ['other'], behavior: ok },
+  ], { mode: 'pinned', pinnedProviderId: 'B' });
+  try {
+    assert.equal((await send(t.base, simple({ model: 'wanted' }))).provider, 'A');
+    assert.equal((await send(t.base, simple({ model: 'other@provider=B' }))).provider, 'B');
+  } finally { await t.close(); }
+});
+
+test('unknown and empty catalogs retain old routing behavior', async () => {
+  for (const models of [null, []]) {
+    const t = await setup([{ name: 'A', models, behavior: ok }, { name: 'B', models: ['wanted'], behavior: ok }]);
+    try {
+      assert.equal((await send(t.base, simple({ model: 'wanted' }))).provider, 'A');
+      assert.equal(t.m.B.calls.length, 0);
+      assert.equal(t.app.state.health('A').status, 'healthy');
+    } finally { await t.close(); }
+  }
+});
+
+test('stale discovery failures keep last good catalog and do not penalize health', async () => {
+  const t = await setup([{ name: 'A', models: ['wanted'], behavior: ok }]);
+  try {
+    await listModels(t);
+    const p = t.app.config.provider('A');
+    const updated = t.app.models.view(p).modelsUpdatedAt;
+    t.m.A.models = () => err(401, 'authentication_error', 'discovery unavailable');
+    t.app.models.entry(p).attemptedAt = 0;
+    assert.deepEqual((await listModels(t)).data.map((m) => m.id), ['wanted']);
+    assert.equal(t.m.A.modelCalls.length, 2);
+    assert.equal(t.app.models.view(p).modelsUpdatedAt, updated);
+    assert.equal(t.app.state.health('A').status, 'healthy');
+    assert.equal((await send(t.base, simple({ model: 'wanted@provider=A' }))).provider, 'A');
+    assert.equal(t.m.A.calls[0].body.model, 'wanted');
+    t.m.A.models = ['new'];
+    t.app.models.entry(p).attemptedAt = 0;
+    await t.app.models.refreshAll();
+    assert.deepEqual(t.app.models.view(p).models, ['new']);
+  } finally { await t.close(); }
+});
+
+test('modelMap aliases retain mapping when filtering discovered catalogs', async () => {
+  const t = await setup([{ name: 'A', models: ['actual'], provider: { modelMap: { 'alias*': 'actual' } }, behavior: ok }]);
+  try {
+    assert.equal((await send(t.base, simple({ model: 'alias-model@provider=A' }))).provider, 'A');
+    assert.equal(t.m.A.calls[0].body.model, 'actual');
+  } finally { await t.close(); }
+});
 
 test('streams through the first provider and swaps credentials', async () => {
   const t = await setup([{ name: 'A', behavior: (c) => ok(c) }, { name: 'B', behavior: (c) => ok(c) }]);
@@ -251,11 +369,11 @@ async function waitFor(fn, ms = 5000) {
   throw new Error('timeout waiting');
 }
 
-test('context overflow: fail over, summarize in background, then return to the cheap provider', async () => {
+test('[sizeFailover] context overflow: fail over, summarize in background, then return to the cheap provider', async () => {
   const t = await setup([
     { name: 'A', behavior: (c) => (tooLong(c) ? ctxErr() : ok(c)), provider: { allowCompaction: true } },
     { name: 'B', behavior: (c) => (isSummarizer(c) ? ok(c, 'SUMMARY-XYZ: 用户在做智能路由') : ok(c)) },
-  ]);
+  ], { sizeFailover: true });
   try {
     const body1 = convo(21);
     const r1 = await send(t.base, body1);
@@ -465,11 +583,11 @@ test('client compaction detection tolerates case, whitespace, blocks and system 
   ] }] })), false, 'tool output is not a compaction instruction');
 });
 
-test('client /compact skips known-small providers and sends full history despite a ready summary', async () => {
+test('[sizeFailover] client /compact skips known-small providers and sends full history despite a ready summary', async () => {
   const t = await setup([
     { name: 'A', behavior: (c) => ok(c), provider: { allowCompaction: true } },
     { name: 'B', behavior: (c) => ok(c) },
-  ]);
+  ], { sizeFailover: true });
   try {
     const body = compactRequest();
     readySummary(t.app, body);
@@ -487,11 +605,11 @@ test('client /compact skips known-small providers and sends full history despite
   } finally { await t.close(); }
 });
 
-test('client /compact tries full on unknown providers then falls back only after all reject full', async () => {
+test('[sizeFailover] client /compact tries full on unknown providers then falls back only after all reject full', async () => {
   const t = await setup([
     { name: 'A', behavior: (c) => hasSummary(c) ? ok(c) : ctxErr(), provider: { allowCompaction: true } },
     { name: 'B', behavior: () => ctxErr() },
-  ]);
+  ], { sizeFailover: true });
   try {
     const body = compactRequest();
     readySummary(t.app, body);
@@ -512,11 +630,11 @@ test('client /compact tries full on unknown providers then falls back only after
   } finally { await t.close(); }
 });
 
-test('client /compact continues full-history pass after a context rejection with a ready summary', async () => {
+test('[sizeFailover] client /compact continues full-history pass after a context rejection with a ready summary', async () => {
   const t = await setup([
     { name: 'A', behavior: () => ctxErr(), provider: { allowCompaction: true } },
     { name: 'B', behavior: (c) => ok(c) },
-  ]);
+  ], { sizeFailover: true });
   try {
     const body = compactRequest();
     readySummary(t.app, body);
@@ -526,13 +644,13 @@ test('client /compact continues full-history pass after a context rejection with
   } finally { await t.close(); }
 });
 
-test('413 learns byte limits, builds a byte-budgeted tail and compacts subsequent image-heavy requests', async () => {
+test('[sizeFailover] 413 learns byte limits, builds a byte-budgeted tail and compacts subsequent image-heavy requests', async () => {
   const byteLimit = 180000;
   const t = await setup([
     { name: 'A', behavior: (c) => Buffer.byteLength(JSON.stringify(c.body)) > byteLimit
       ? { status: 413, raw: '<html>Request Entity Too Large</html>' } : ok(c), provider: { allowCompaction: true } },
     { name: 'B', behavior: (c) => ok(c, isSummarizer(c) ? 'BYTE-SUMMARY' : 'ok') },
-  ]);
+  ], { sizeFailover: true });
   try {
     const body = convo(12);
     body.messages[8].content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'a'.repeat(220000) } });
@@ -556,11 +674,11 @@ test('413 learns byte limits, builds a byte-budgeted tail and compacts subsequen
   } finally { await t.close(); }
 });
 
-test('known oversized bytes skip a provider without a summary instead of repeating 413', async () => {
+test('[sizeFailover] known oversized bytes skip a provider without a summary instead of repeating 413', async () => {
   const t = await setup([
     { name: 'A', behavior: () => ({ status: 413, raw: 'Request Entity Too Large' }) },
     { name: 'B', behavior: (c) => ok(c) },
-  ], { costAwareFailover: { minTokens: 0 } });
+  ], { sizeFailover: true, costAwareFailover: { minTokens: 0 } });
   try {
     const body = convo(5);
     assert.equal((await send(t.base, body)).provider, 'B');
@@ -688,19 +806,115 @@ test('new cache settings have defaults and normalize nested panel updates', asyn
   } finally { await t.close(); }
 });
 
-test('all byte-limited providers report 413, including requests skipped from learned bytes', async () => {
+test('byte-limited text requests answer "prompt is too long" with a token gap, including learned-byte skips', async () => {
   const t = await setup([{ name: 'A', behavior: () => ({ status: 413, raw: 'Request Entity Too Large' }) }]);
   try {
     for (let i = 0; i < 2; i++) {
       const r = await send(t.base, convo(5));
-      assert.equal(r.status, 413);
+      assert.equal(r.status, 400);
+      assert.match(r.json.error.message, /^Prompt is too long: (\d+) tokens > (\d+) maximum/);
+      const [, actual, max] = r.json.error.message.match(/(\d+) tokens > (\d+)/).map(Number);
+      assert.ok(actual > max, 'Claude Code reads a positive gap');
       assert.match(r.json.error.message, /字节上限/);
     }
     assert.equal(t.m.A.calls.length, 1);
   } finally { await t.close(); }
 });
 
-test('cost retries exclude auth, quota, model and genuine context errors even above the threshold', async () => {
+const REACTIVE_UA = 'claude-cli/2.1.295 (external, claude-desktop-3p, agent-sdk/0.3.295)';
+
+test('size hold: byte 413 stays on the cheap relay, no cold failover and no router summary for reactive Claude Code', async () => {
+  const t = await setup([
+    { name: 'A', behavior: () => ({ status: 413, raw: '<html>413 Request Entity Too Large</html>' }), provider: { allowCompaction: true } },
+    { name: 'B', behavior: (c) => ok(c) },
+  ]);
+  try {
+    let schedules = 0;
+    const orig = t.app.compactor.schedule.bind(t.app.compactor);
+    t.app.compactor.schedule = (...a) => { schedules++; return orig(...a); };
+    const body = convo(21);
+    const r = await send(t.base, body, { ua: REACTIVE_UA });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error.message, /^Prompt is too long: \d+ tokens > \d+ maximum/);
+    assert.equal(t.m.B.calls.length, 0, 'the full history never goes to the cold relay');
+    assert.equal(schedules, 0, 'Claude Code compacts by itself');
+    // Claude Code's own compaction request also exceeds the learned byte limit: same answer, still no failover.
+    const compact = convo(31);
+    compact.messages.at(-1).content = [{ type: 'text', text: 'Your task is to create a detailed summary of the conversation so far.' }];
+    const r2 = await send(t.base, compact, { ua: REACTIVE_UA });
+    assert.equal(r2.status, 400);
+    assert.match(r2.json.error.message, /^Prompt is too long/);
+    assert.equal(t.m.A.calls.length, 1, 'known-oversized bodies are not re-sent');
+    assert.equal(t.m.B.calls.length, 0);
+    const row = t.app.store.queryRequests({ kind: 'messages' })[0];
+    assert.equal(row.status, 400);
+    assert.match(row.error, /交回客户端/);
+  } finally { await t.close(); }
+});
+
+test('size hold: older or unknown clients still get a router summary scheduled, on the same relay', async () => {
+  const t = await setup([
+    { name: 'A', behavior: (c) => tooLong(c) ? ctxErr() : ok(c, isSummarizer(c) ? 'OLD-CLIENT-SUMMARY' : 'ok'), provider: { allowCompaction: true } },
+    { name: 'B', behavior: (c) => ok(c) },
+  ]);
+  try {
+    const body = convo(21);
+    const r = await send(t.base, body, { ua: 'claude-cli/2.0.10 (external, cli)' });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error.message, /^Prompt is too long/);
+    assert.equal(t.m.B.calls.length, 0);
+    const key = t.app.compactor.sessionKey(body);
+    await waitFor(() => t.app.compactor.get(key)?.status === 'ready');
+    assert.ok(t.m.B.calls.every(isSummarizer), 'B only ever sees the summarizer prompt, never the full request');
+    const r2 = await send(t.base, body, { ua: 'claude-cli/2.0.10 (external, cli)' });
+    assert.equal(r2.status, 200);
+    assert.equal(r2.provider, 'A');
+    assert.match(JSON.stringify(t.m.A.calls.at(-1).body), /context-summary/);
+  } finally { await t.close(); }
+});
+
+test('size hold: media-heavy bodies keep 413 so Claude Code strips images; real outages still fail over', async () => {
+  const t = await setup([
+    { name: 'A', behavior: (c) => c.n === 0 ? { status: 413, raw: 'Request Entity Too Large' } : err(503, 'api_error', 'No available accounts') },
+    { name: 'B', behavior: (c) => ok(c) },
+  ], { sameProviderRetry: 0 });
+  try {
+    const body = convo(5);
+    body.messages[2].content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'a'.repeat(200000) } });
+    const r = await send(t.base, body, { ua: REACTIVE_UA });
+    assert.equal(r.status, 413);
+    assert.equal(r.json.error.type, 'request_too_large');
+    assert.equal(t.m.B.calls.length, 0);
+    const r2 = await send(t.base, simple(), { ua: REACTIVE_UA });
+    assert.equal(r2.provider, 'B', '503 is a real failure: fail over as before');
+  } finally { await t.close(); }
+});
+
+test('reactive client detection and size settings defaults', async () => {
+  const t = await setup([{ name: 'A', behavior: (c) => ok(c) }]);
+  try {
+    const r = t.app.router;
+    const req = (ua) => ({ headers: { 'user-agent': ua } });
+    assert.equal(r.clientCompactsItself(req(REACTIVE_UA)), true);
+    assert.equal(r.clientCompactsItself(req('claude-cli/2.1.195 (external, cli)')), true);
+    assert.equal(r.clientCompactsItself(req('claude-cli/2.1.194')), false);
+    assert.equal(r.clientCompactsItself(req('claude-cli/test')), false);
+    assert.equal(r.clientCompactsItself(req('curl/8')), false);
+    let s = t.app.config.settings;
+    assert.equal(s.sizeFailover, false);
+    assert.equal(s.reactiveCompactMinVersion, '2.1.195');
+    t.app.config.updateSettings({ sizeFailover: 1, reactiveCompactMinVersion: 'x' });
+    s = t.app.config.settings;
+    assert.equal(s.sizeFailover, false, 'only an explicit true enables it');
+    assert.equal(s.reactiveCompactMinVersion, '2.1.195');
+    t.app.config.updateSettings({ sizeFailover: true, reactiveCompactMinVersion: '2.2' });
+    s = t.app.config.settings;
+    assert.equal(s.sizeFailover, true);
+    assert.equal(s.reactiveCompactMinVersion, '2.2');
+  } finally { await t.close(); }
+});
+
+test('[sizeFailover] cost retries exclude auth, quota, model and genuine context errors even above the threshold', async () => {
   for (const failure of [
     err(401, 'authentication_error', 'invalid api key'),
     err(402, 'api_error', 'payment required'),
@@ -708,7 +922,7 @@ test('cost retries exclude auth, quota, model and genuine context errors even ab
   ]) {
     const t = await setup([
       { name: 'A', behavior: () => failure }, { name: 'B', behavior: (c) => ok(c) },
-    ], { costAwareFailover: { minTokens: 0 } });
+    ], { sizeFailover: true, costAwareFailover: { minTokens: 0 } });
     try {
       assert.equal((await send(t.base, simple())).provider, 'B');
       assert.equal(t.m.A.calls.length, 1);

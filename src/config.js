@@ -51,6 +51,11 @@ const DEFAULT_SETTINGS = {
   maxAttempts: 5,
   sameProviderRetry: 1, // quick retries on the same provider for network/5xx errors
   cacheTtlSec: 300,
+  // Over a relay's size limit: false = stay on it and hand the request back as "prompt is too long",
+  // so the client compacts and keeps the cheap, warm relay; true = fail over to the next relay (cold cache).
+  sizeFailover: false,
+  // Claude Code at or above this version compacts by itself on "prompt is too long", so the router skips its own summary.
+  reactiveCompactMinVersion: '2.1.195',
   costAwareFailover: {
     minTokens: 100000,
     extraRetries: 2, // additional attempts, excluded from maxAttempts (which counts ordinary attempts)
@@ -111,6 +116,9 @@ function normalizeSettings(s) {
   s.cacheTtlSec = integer(s.cacheTtlSec, DEFAULT_SETTINGS.cacheTtlSec);
   s.costAwareFailover = mergeDefaults(DEFAULT_SETTINGS.costAwareFailover, s.costAwareFailover || {});
   for (const k of ['minTokens', 'extraRetries']) s.costAwareFailover[k] = integer(s.costAwareFailover[k], DEFAULT_SETTINGS.costAwareFailover[k]);
+  s.sizeFailover = s.sizeFailover === true;
+  s.reactiveCompactMinVersion = /^\d+(\.\d+)*$/.test(String(s.reactiveCompactMinVersion || '').trim())
+    ? String(s.reactiveCompactMinVersion).trim() : DEFAULT_SETTINGS.reactiveCompactMinVersion;
   s.compaction.compactOnFailover = s.compaction.compactOnFailover !== false;
   s.compaction.reportFullUsage = s.compaction.reportFullUsage !== false;
   return s;

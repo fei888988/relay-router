@@ -1,4 +1,4 @@
-import { api, empty } from './core.js';
+import { api, empty, pageHead } from './core.js';
 import { feedItem } from './overview.js';
 
 // Filter groups shown as chips; each maps to one or more event types.
@@ -13,15 +13,15 @@ const matches = (e) => (!group || group.split(',').includes(e.type)) && (!level 
 
 export async function render(el) {
   el.innerHTML = `
-    <div class="head"><h1>事件日志</h1></div>
-    <div class="filters">
+    ${pageHead('events', '<span class="tag" id="ev-count">…</span>')}
+    <div class="filters" data-rv>
       <div class="chips" id="e-g">${GROUPS.map(([k, v]) => `<button data-v="${k}" class="${group === k ? 'on' : ''}">${v}</button>`).join('')}</div>
       <span class="grow"></span>
       <select id="e-l" aria-label="级别">
         ${[['', '全部级别'], ['error', '错误'], ['warn', '警告'], ['success', '成功'], ['info', '信息']].map(([k, v]) => `<option value="${k}" ${level === k ? 'selected' : ''}>${v}</option>`).join('')}
       </select>
     </div>
-    <section class="card"><ul class="feed" id="ev-list"></ul>
+    <section class="card hud ev-card" data-rv><ul class="feed stagger" id="ev-list"></ul>
       <div class="row" style="justify-content:center;margin-top:10px"><button class="btn ghost" id="e-more">加载更多</button></div></section>`;
   el.querySelector('#e-g').onclick = (e) => {
     const b = e.target.closest('button');
@@ -42,7 +42,12 @@ export async function render(el) {
 function paint(el) {
   const box = el.querySelector('#ev-list');
   const shown = list.filter(matches);
-  if (box) box.innerHTML = shown.length ? shown.map((e) => feedItem(e)).join('') : `<li style="display:block">${empty('没有符合条件的事件')}</li>`;
+  if (box) {
+    box.innerHTML = shown.length ? shown.map((e) => feedItem(e)).join('') : `<li style="display:block">${empty('没有符合条件的事件')}</li>`;
+    box.querySelectorAll('li').forEach((li, i) => li.style.setProperty('--i', Math.min(i, 30)));
+  }
+  const c = el.querySelector('#ev-count');
+  if (c) c.textContent = `${shown.length} / ${list.length}`;
 }
 
 export function onLive(el, e) {

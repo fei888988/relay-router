@@ -78,10 +78,10 @@ class State {
   }
 
   // Ordered list of providers to try for a request.
-  candidates() {
+  candidates(accepts = () => true) {
     const s = this.s;
-    const all = this.config.providers;
-    if (s.mode === 'pinned' && s.pinnedProviderId) {
+    const all = this.config.providers.filter(accepts);
+    if (s.mode === 'pinned' && s.pinnedProviderId && accepts(this.config.provider(s.pinnedProviderId))) {
       const p = this.config.provider(s.pinnedProviderId);
       return { list: p && this.isConfigured(p) ? [p] : [], lastResort: false };
     }

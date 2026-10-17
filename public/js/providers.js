@@ -1,4 +1,5 @@
-import { store, esc, api, refreshStatus, toast, busy, modal, closeModal, providerStatus, pill } from './core.js';
+import { store, esc, api, refreshStatus, toast, busy, modal, closeModal, providerStatus, pill, ask, pageHead } from './core.js';
+import { reveal } from './fx.js';
 import { icon } from './icons.js';
 import { providerForm, readForm } from './pform.js';
 
@@ -7,22 +8,22 @@ let openId = null;
 export function render(el) {
   const st = store.status;
   el.innerHTML = `
-    <div class="head"><h1>中转站</h1>
-      <button class="btn" id="imp" ${st.ccSwitchDb ? '' : 'disabled title="没找到 CC Switch"'}>${icon('download')}从 CC Switch 导入</button>
-      <button class="btn primary" id="add">${icon('plus')}添加</button></div>
-    <p class="muted small" style="margin:-8px 0 14px">从上到下就是优先级，在概览页可以调整顺序。</p>
+    ${pageHead('providers', `<button class="btn" id="imp" ${st.ccSwitchDb ? '' : 'disabled title="没找到 CC Switch"'}>${icon('download')}从 CC Switch 导入</button>
+      <button class="btn primary" id="add">${icon('plus')}添加</button>`)}
+    <p class="muted small" style="margin:0 0 18px" data-rv>从上到下就是优先级，在概览页可以调整顺序。</p>
     ${st.providers.map((p, i) => {
       const ps = providerStatus(p);
-      return `<details class="card pedit" data-id="${p.id}" ${openId === p.id ? 'open' : ''}>
-        <summary><span class="rank">${i + 1}</span><span class="pname">${esc(p.name)}</span>
+      return `<details class="card pedit" data-id="${p.id}" ${openId === p.id ? 'open' : ''} data-rv>
+        <summary><span class="rank">${String(i + 1).padStart(2, '0')}</span><span class="pname">${esc(p.name)}</span>
           <span class="faint small mono grow">${esc(p.baseUrl.replace(/^https?:\/\//, ''))}</span>${pill(ps.cls, ps.text)}<span class="chev">${icon('chev')}</span></summary>
         ${providerForm(p)}
       </details>`;
     }).join('')}
-    <details class="card pedit" id="new-box" ${openId === 'new' ? 'open' : ''}>
+    <details class="card pedit" id="new-box" ${openId === 'new' ? 'open' : ''} data-rv>
       <summary><span class="rank">${icon('plus')}</span><span class="pname grow">新线路</span><span class="chev">${icon('chev')}</span></summary>
       ${providerForm(null)}
     </details>`;
+  reveal(el);
   el.addEventListener('toggle', (e) => {
     if (e.target.matches('details.pedit') && e.target.open) openId = e.target.dataset.id || 'new';
   }, true);
@@ -48,7 +49,7 @@ async function click(e, el) {
   const del = e.target.closest('[data-del]');
   if (del) {
     const p = store.status.providers.find((x) => x.id === del.dataset.del);
-    if (!confirm(`删除「${p.name}」？此操作不可撤销。`)) return;
+    if (!(await ask(`删除「${p.name}」？此操作不可撤销。`, { ok: '删除', danger: true }))) return;
     await busy(del, async () => {
       await api('providers/' + p.id, { method: 'DELETE' });
       await refreshStatus();

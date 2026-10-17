@@ -60,9 +60,40 @@ function stripThinking(body) {
 
 const isSignatureError = (text) => /signature/i.test(text || '') && /thinking/i.test(text || '');
 
+// "claude-cli/2.1.295 (external, ...)" -> [2, 1, 295]; null for other clients.
+function claudeCliVersion(ua) {
+  const m = /claude-cli\/(\d+(?:\.\d+)*)/i.exec(ua || '');
+  return m ? m[1].split('.').map(Number) : null;
+}
+
+function versionAtLeast(v, min) {
+  const want = String(min).split('.').map(Number);
+  for (let i = 0; i < Math.max(v.length, want.length); i++) {
+    const a = v[i] || 0;
+    const b = want[i] || 0;
+    if (a !== b) return a > b;
+  }
+  return true;
+}
+
+// Base64 image/document bytes: these can't be summarized away, only stripped.
+function mediaBytes(body) {
+  let n = 0;
+  const walk = (c) => {
+    if (!Array.isArray(c)) return;
+    for (const b of c) {
+      if (!b) continue;
+      if ((b.type === 'image' || b.type === 'document') && b.source && typeof b.source.data === 'string') n += b.source.data.length;
+      if (b.type === 'tool_result') walk(b.content);
+    }
+  };
+  for (const m of (body && body.messages) || []) walk(m.content);
+  return n;
+}
+
 class Router {
-  constructor({ config, state, bus, store, compactor }) {
-    Object.assign(this, { config, state, bus, store, compactor });
+  constructor({ config, state, bus, store, compactor, models }) {
+    Object.assign(this, { config, state, bus, store, compactor, models });
   }
 
   get s() {
@@ -80,6 +111,10 @@ class Router {
   async handle(req, res, url) {
     if (!this.checkKey(req)) {
       return anthropicError(res, 401, 'authentication_error', '[智能路由] 路由密钥不正确：请把 CC Switch 里的 API Key 设为面板「接入指南」中的路由密钥');
+    }
+    if (req.method === 'GET' && /^\/v1\/models\/?$/.test(url.pathname)) {
+      await this.models.refreshAll();
+      return sendJson(res, 200, this.models.list());
     }
     let bodyBuf;
     try {
@@ -102,12 +137,24 @@ class Router {
         return anthropicError(res, 400, 'invalid_request_error', '[智能路由] 请求体不是合法 JSON');
       }
     }
+    if (kind !== 'other') {
+      body.model = this.models.base(body.model);
+      bodyBuf = Buffer.from(JSON.stringify(body));
+      // Only block on providers never fetched; stale catalogs refresh in the background.
+      await this.models.refreshAll({ blockingOnlyCold: true });
+    }
     if (kind === 'messages') {
       this.state.lastClientHeaders = pickIdentityHeaders(req.headers);
       return this.handleMessages(req, res, url, body);
     }
     if (kind === 'count_tokens') return this.handleCountTokens(req, res, url, body, bodyBuf);
     return this.handleOther(req, res, url, bodyBuf);
+  }
+
+  modelCandidates(model) {
+    const filtered = this.state.candidates((p) => !p || this.models.supports(p, mapModel(p, model)));
+    // No catalog lists this id (alias, new model): the filter is advisory, keep old behaviour.
+    return filtered.list.length ? filtered : this.state.candidates();
   }
 
   async handleMessages(req, res, url, body) {
@@ -121,7 +168,7 @@ class Router {
     const fullBytes = Buffer.byteLength(JSON.stringify(body));
     const clientCompact = isClientCompact(body);
     const key = this.compactor.sessionKey(body);
-    const { list, lastResort } = this.state.candidates();
+    const { list, lastResort } = this.modelCandidates(body.model);
     const attempts = [];
     const row = {
       ts: t0, kind: 'messages', session: key, model: body.model, stream: !!body.stream, estTokens: fullEst,
@@ -134,6 +181,16 @@ class Router {
     let tries = 0;
     const fullRejected = new Set();
     let failedOver = false;
+    // Size rejections stay on the relay that rejected (unless sizeFailover): the client is told
+    // "prompt is too long" and compacts there instead of re-sending the whole history to a cold relay.
+    const holdOnSize = !s.sizeFailover;
+    let sizeHold = null;
+    const holdSize = (p, kind, est, bytes) => {
+      if (holdOnSize && !sizeHold) sizeHold = { p, kind, est, bytes };
+    };
+    // Claude Code that compacts by itself on "prompt is too long" needs no router summary.
+    const reactive = holdOnSize && this.clientCompactsItself(req);
+    const maySchedule = !clientCompact && !reactive;
 
     if (!list.length) {
       row.error = '没有可用的中转站';
@@ -143,9 +200,10 @@ class Router {
 
     // Client /compact gets a full-history pass across all providers before any summary fallback.
     for (const phase of clientCompact ? ['full', 'fallback'] : ['normal']) {
-      if (phase === 'fallback' && !list.every((p) => fullRejected.has(p.id))) break;
+      if (phase === 'fallback' && !sizeHold && !list.every((p) => fullRejected.has(p.id))) break;
       for (let i = 0; i < list.length && tries < s.maxAttempts; i++) {
         const p = list[i];
+        if (phase === 'fallback' && sizeHold && p.id !== sizeHold.p.id) continue;
         const isLast = i === list.length - 1;
         const model = mapModel(p, body.model);
         if (this.state.isModelUnavailable(p, model) && !isLast) {
@@ -167,6 +225,8 @@ class Router {
           if (!this.state.tooManyBytes(p, fullBytes)) allBytes = false;
           fullRejected.add(p.id);
           attempts.push({ providerId: p.id, skipped: true, reason: '完整历史超过已知上限' });
+          holdSize(p, this.state.tooManyBytes(p, fullBytes) ? 'bytes' : 'tokens', fullEst, fullBytes);
+          if (sizeHold) break;
           continue;
         }
         if ((!clientCompact && ((tooBig && comp) || compactedFailover)) || (phase === 'fallback' && comp)) variant = 'compacted';
@@ -190,7 +250,8 @@ class Router {
             sizeBlocked = true;
             attempts.push({ providerId: p.id, variant, skipped: true, sentBytes: bodyBuf.length, reason: '请求体超过已知字节上限' });
             if (clientCompact && phase === 'full') fullRejected.add(p.id);
-            if (eligible && !clientCompact) this.compactor.schedule(key, body, p, '请求体超过已知字节上限');
+            if (eligible && maySchedule) this.compactor.schedule(key, body, p, '请求体超过已知字节上限');
+            holdSize(p, 'bytes', sendEst, bodyBuf.length);
             failedOver = true;
             break;
           }
@@ -247,13 +308,14 @@ class Router {
           if (sizeError) {
             if (cls.category === 'body_too_large') this.state.learnRejectedBytes(p, bodyBuf.length);
             else this.state.learnRejected(p, sendEst);
+            holdSize(p, cls.category === 'body_too_large' ? 'bytes' : 'tokens', sendEst, bodyBuf.length);
             if (clientCompact && phase === 'full') {
               fullRejected.add(p.id);
               break;
             }
             if (variant === 'compacted') {
               this.compactor.invalidate(key, `压缩后（≈${Math.round(sendEst / 1000)}k）仍被 ${p.name} 拒绝，将保留更少的近期消息重新压缩`, { shrink: true });
-              if (eligible && !clientCompact) this.compactor.schedule(key, body, p, '压缩后仍超限');
+              if (eligible && maySchedule) this.compactor.schedule(key, body, p, '压缩后仍超限');
             } else if (eligible) {
               const ready = this.compactor.lookup(key, body);
               if (ready && tries < s.maxAttempts) {
@@ -263,7 +325,7 @@ class Router {
                 rec.next = '使用已有摘要重试';
                 continue;
               }
-              if (!clientCompact) this.compactor.schedule(key, body, p, `${p.name} 拒绝了 ≈${Math.round(sendEst / 1000)}k 的请求`);
+              if (maySchedule) this.compactor.schedule(key, body, p, `${p.name} 拒绝了 ≈${Math.round(sendEst / 1000)}k 的请求`);
             }
             break;
           }
@@ -304,12 +366,13 @@ class Router {
           }
         }
         failedOver = true;
-        if (tries >= s.maxAttempts) break;
+        if (sizeHold || tries >= s.maxAttempts) break;
       }
     }
 
     // Every provider failed.
     row.error = attempts.filter((a) => !a.skipped).map((a) => `${this.pname(a.providerId)}: ${a.label || a.category}`).join(' → ') || '全部跳过';
+    if (sizeHold) return this.replySizeHold(res, row, body, sizeHold);
     this.finish(row, false, lastFail ? lastFail.r.status : sizeBlocked ? (allBytes ? 413 : 400) : null);
     if (allContext && (lastFail || sizeBlocked)) {
       if (allBytes) return anthropicError(res, 413, 'request_too_large', '[智能路由] 请求体超过所有可用中转站的字节上限，请执行 /compact 或减少图片及附件。');
@@ -321,6 +384,44 @@ class Router {
     const type = status === 429 ? 'rate_limit_error' : status === 400 ? 'invalid_request_error' : status === 529 ? 'overloaded_error' : 'api_error';
     const detail = lastFail ? `${lastFail.cls.label}：${truncate(lastFail.r.text, 400)}` : '';
     return anthropicError(res, status, type, `[智能路由] 所有中转站均失败（${row.error}）。最后错误 ${detail}`);
+  }
+
+  clientCompactsItself(req) {
+    const v = claudeCliVersion(req.headers['user-agent']);
+    return !!(v && versionAtLeast(v, this.s.reactiveCompactMinVersion));
+  }
+
+  // The request is over a relay's size limit and we are not failing over. Answer in the shape Claude Code
+  // recognises ("Prompt is too long: N tokens > M maximum"), so it runs its reactive compaction and,
+  // when the summary request itself is too big, keeps more recent turns verbatim and summarizes less.
+  replySizeHold(res, row, body, hold) {
+    const { p, kind, est, bytes } = hold;
+    const name = p.name;
+    if (kind === 'bytes' && bytes && mediaBytes(body) >= bytes * 0.4) {
+      // Mostly images/documents: summarizing can't shrink them; Claude Code strips media on request_too_large.
+      row.error += ` → 已交回客户端（${name} 请求体超限，主要是图片/文档）`;
+      this.finish(row, false, 413);
+      return anthropicError(res, 413, 'request_too_large',
+        `[智能路由] 请求体超过 ${name} 的字节上限（约 ${Math.round(bytes / 1024)} KiB），主要由图片或文档组成，请减少附件。`);
+    }
+    const cal = this.state.data.calibration[p.id];
+    const ratio = cal && cal.ratio > 0 ? cal.ratio : 1;
+    let factor = 0.9;
+    if (kind === 'bytes') {
+      const limit = this.state.effectiveByteLimit(p);
+      if (limit && bytes) factor = (limit * 0.95) / bytes;
+    } else {
+      const limit = this.state.effectiveLimit(p);
+      if (limit && est) factor = (limit * 0.95) / est;
+    }
+    factor = Math.min(Math.max(factor, 0.1), 0.97);
+    const actual = Math.max(1, Math.round((est || estimateRequest(body)) * ratio));
+    const maximum = Math.max(1, Math.floor(actual * factor));
+    const what = kind === 'bytes' ? `请求体约 ${Math.round(bytes / 1024)} KiB，超过 ${name} 的字节上限` : `超过 ${name} 的上下文上限`;
+    row.error += ` → 已交回客户端压缩（${what}）`;
+    this.finish(row, false, 400);
+    return anthropicError(res, 400, 'invalid_request_error',
+      `Prompt is too long: ${actual} tokens > ${maximum} maximum [智能路由] ${what}，未切换到更贵的线路；请压缩会话（/compact）。`);
   }
 
   pname(id) {
@@ -390,7 +491,7 @@ class Router {
   }
 
   async handleCountTokens(req, res, url, body, bodyBuf) {
-    const { list } = this.state.candidates();
+    const { list } = this.modelCandidates(body.model);
     for (const p of list) {
       const model = mapModel(p, body.model);
       const buf = model !== body.model ? Buffer.from(JSON.stringify({ ...body, model })) : bodyBuf;

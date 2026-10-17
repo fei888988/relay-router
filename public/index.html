@@ -3,24 +3,43 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>智能路由</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%235b5bd6'/><path d='M9 21l5-8 4 5 5-7' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#07080a" />
+  <title>智能路由 · Signal Deck</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2307080a'/><path d='M7 22c6 0 6-12 12-12h6' stroke='%23d4ff3a' stroke-width='3' fill='none' stroke-linecap='round'/><circle cx='7' cy='22' r='3' fill='%23d4ff3a'/></svg>" />
   <link rel="stylesheet" href="/css/base.css" />
   <link rel="stylesheet" href="/css/components.css" />
   <link rel="stylesheet" href="/css/pages.css" />
 </head>
-<body>
+<body class="booting">
   <a class="skip" href="#main">跳到主要内容</a>
-  <div class="app">
-    <aside class="side">
-      <div class="brand"><span class="logo" id="logo"></span><b>智能路由</b></div>
-      <nav class="nav" id="nav" aria-label="页面"></nav>
-      <div class="conn" id="conn" role="status"><span class="dot"></span><span class="txt">连接中</span></div>
-    </aside>
-    <main id="main" tabindex="-1"></main>
+
+  <!-- Ambient layers: grid, cursor light, grain. Pure decoration. -->
+  <div class="fx" aria-hidden="true">
+    <div class="fx-grid"></div>
+    <div class="fx-aurora"></div>
+    <div class="fx-light" id="fx-light"></div>
+    <div class="fx-grain"></div>
   </div>
 
+  <header class="topbar" id="bar">
+    <a class="brand" href="#overview" aria-label="智能路由 首页">
+      <span class="mark" id="logo"></span>
+      <span class="brand-t"><b>智能路由</b><i>SIGNAL&nbsp;DECK</i></span>
+    </a>
+    <div class="crumb" aria-hidden="true"><span id="crumb-i">00</span><span class="crumb-sep">/</span><span id="crumb-t">OVERVIEW</span></div>
+    <span class="grow"></span>
+    <button class="kbtn" id="open-palette" type="button" aria-label="打开命令面板"><span>命令</span><kbd>Ctrl</kbd><kbd>K</kbd></button>
+    <div class="clock mono" id="clock" aria-hidden="true">--:--:--</div>
+    <div class="conn" id="conn" role="status"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="txt">连接中</span></div>
+  </header>
+
+  <main id="main" tabindex="-1"></main>
+
+  <nav class="dock" id="nav" aria-label="页面"></nav>
+
   <div class="toasts" id="toasts" aria-live="polite"></div>
+
   <dialog id="modal" class="modal" aria-labelledby="modal-title">
     <div class="modal-head">
       <h2 id="modal-title"></h2>
@@ -28,6 +47,21 @@
     </div>
     <div class="modal-body" id="modal-body"></div>
   </dialog>
+
+  <dialog id="palette" class="palette" aria-label="命令面板">
+    <div class="pal-in"><span class="pal-glyph">›</span><input id="pal-q" placeholder="跳转页面、探测线路、切换模式…" autocomplete="off" aria-label="搜索命令" /><kbd>Esc</kbd></div>
+    <ul class="pal-list" id="pal-list" role="listbox"></ul>
+  </dialog>
+
+  <div class="boot" id="boot" aria-hidden="true">
+    <div class="shutter top"></div><div class="shutter bot"></div>
+    <div class="boot-core">
+      <svg class="boot-mark" viewBox="0 0 120 120"><circle class="ring" cx="60" cy="60" r="54"/><path class="trace" d="M22 84c26 0 24-48 52-48h24"/><circle class="node a" cx="22" cy="84" r="6"/><circle class="node b" cx="98" cy="36" r="6"/></svg>
+      <div class="boot-name" data-scramble="SMART · ROUTER">SMART · ROUTER</div>
+      <ol class="boot-log mono" id="boot-log"></ol>
+      <div class="boot-meter"><i></i></div>
+    </div>
+  </div>
 
   <script type="module" src="/js/main.js"></script>
 </body>

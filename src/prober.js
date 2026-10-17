@@ -5,24 +5,26 @@ const { classify } = require('./classify');
 const { truncate } = require('./util');
 
 class Prober {
-  constructor({ config, state, bus, store }) {
-    Object.assign(this, { config, state, bus, store });
+  constructor({ config, state, bus, store, models }) {
+    Object.assign(this, { config, state, bus, store, models });
     this.inflight = new Set();
     this.timer = null;
   }
 
   start() {
     this.timer = setInterval(() => this.tick(), 15000);
-    setTimeout(() => this.tick(), 3000);
+    this.startTimer = setTimeout(() => this.tick(), 3000);
   }
 
   stop() {
     clearInterval(this.timer);
+    clearTimeout(this.startTimer);
   }
 
   tick() {
     for (const p of this.config.providers) {
       if (!this.state.isConfigured(p)) continue;
+      this.models.refresh(p).catch(() => {});
       const h = this.state.health(p.id);
       if (h.status === 'down' && h.nextProbeAt <= Date.now()) this.probe(p, { auto: true }).catch(() => {});
     }
@@ -33,12 +35,10 @@ class Prober {
     const last = this.state.data.lastGoodModel[p.id];
     if (last && last !== exclude) return last;
     // Ask the relay which models it has; prefer a cheap one.
-    try {
-      const r = await attempt({ provider: p, method: 'GET', pathname: '/v1/models', clientHeaders: { 'anthropic-version': '2023-06-01' }, settings: { ...this.config.settings, firstByteTimeoutSec: 20, nonStreamTimeoutSec: 20 } });
-      const ids = r.ok && r.json && Array.isArray(r.json.data) ? r.json.data.map((m) => m.id).filter((x) => x !== exclude && !this.state.isModelUnavailable(p, x)) : [];
-      const pick = ids.find((x) => /haiku/i.test(x)) || ids.find((x) => /sonnet/i.test(x)) || ids[0];
-      if (pick) return pick;
-    } catch {}
+    await this.models.refresh(p);
+    const ids = this.models.view(p).models.filter((x) => x !== exclude && !this.state.isModelUnavailable(p, x));
+    const pick = ids.find((x) => /haiku/i.test(x)) || ids.find((x) => /sonnet/i.test(x)) || ids[0];
+    if (pick) return pick;
     return exclude === 'claude-sonnet-4-6' ? 'claude-sonnet-5' : 'claude-sonnet-4-6';
   }
 

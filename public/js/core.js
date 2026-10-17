@@ -65,43 +65,117 @@ export function providerStatus(p) {
 }
 
 export const pill = (cls, text) => `<span class="pill ${cls}"><span class="d"></span>${text}</span>`;
-export const empty = (text, ic = 'inbox') => `<div class="empty">${icon(ic)}${text}</div>`;
+export const empty = (text, ic = 'inbox') => `<div class="empty"><div class="radar">${icon(ic)}</div>${text}</div>`;
+
+// Page registry: id, 中文名, icon, English code shown in the top bar.
+export const PAGES = [
+  ['overview', '概览', 'grid', 'OVERVIEW'],
+  ['requests', '请求记录', 'list', 'REQUEST LOG'],
+  ['events', '事件日志', 'bell', 'TELEMETRY'],
+  ['sessions', '会话压缩', 'layers', 'COMPACTION'],
+  ['providers', '中转站', 'server', 'RELAYS'],
+  ['settings', '设置', 'sliders', 'CONTROLS'],
+  ['guide', '接入指南', 'book', 'HANDBOOK'],
+];
+
+// Editorial page header: outlined index numeral + eyebrow + title + actions.
+export function pageHead(id, acts = '', extra = '') {
+  const i = PAGES.findIndex((p) => p[0] === id);
+  const [, name, , code] = PAGES[i];
+  return `<div class="head" data-rv><span class="idx" aria-hidden="true">${String(i + 1).padStart(2, '0')}</span>
+    <div class="ttl"><span class="eyebrow">${code}</span><h1>${name}${extra}</h1></div>
+    ${acts ? `<div class="acts">${acts}</div>` : ''}</div>`;
+}
 
 export function toast(msg, level = 'info', ms = 5000) {
   const box = document.getElementById('toasts');
   const el = document.createElement('div');
-  el.className = 'toast';
-  el.innerHTML = `<span class="lv ${level}">${icon(LEVEL_ICON[level] || 'info')}</span><span>${msg}</span>`;
+  el.className = `toast ${level}`;
+  el.innerHTML = `<span class="lv">${icon(LEVEL_ICON[level] || 'info')}</span><span>${msg}</span><i class="life" style="animation-duration:${ms}ms"></i>`;
+  const out = () => {
+    if (el.classList.contains('out')) return;
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 360);
+  };
+  el.onclick = out;
   box.appendChild(el);
-  setTimeout(() => el.remove(), ms);
+  setTimeout(out, ms);
   while (box.children.length > 4) box.firstChild.remove();
+}
+
+// Close a <dialog> with an exit animation.
+export function closeDialog(d) {
+  if (!d.open || d.classList.contains('closing')) return;
+  d.classList.add('closing');
+  setTimeout(() => {
+    if (!d.classList.contains('closing')) return; // re-opened meanwhile
+    d.classList.remove('closing');
+    d.close();
+  }, 200);
 }
 
 export function modal(title, html) {
   const d = document.getElementById('modal');
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-body').innerHTML = html;
+  d.classList.remove('closing');
   if (!d.open) d.showModal();
   return document.getElementById('modal-body');
 }
-export const closeModal = () => document.getElementById('modal').close();
+export const closeModal = () => closeDialog(document.getElementById('modal'));
+
+// Styled replacement for window.confirm(); resolves true/false.
+export function ask(text, { ok = '确定', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const body = modal('请确认', `<p style="margin:0 0 22px;font-size:14.5px;line-height:1.7">${esc(text)}</p>
+      <div class="row" style="justify-content:flex-end"><button class="btn ghost" data-a="0">取消</button>
+      <button class="btn ${danger ? 'danger' : 'primary'}" data-a="1">${esc(ok)}</button></div>`);
+    const d = document.getElementById('modal');
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      d.removeEventListener('close', onClose);
+      resolve(v);
+    };
+    const onClose = () => finish(false);
+    d.addEventListener('close', onClose);
+    body.onclick = (e) => {
+      const b = e.target.closest('[data-a]');
+      if (!b) return;
+      finish(b.dataset.a === '1');
+      closeModal();
+    };
+    body.querySelector('[data-a="1"]').focus();
+  });
+}
 
 // Disable a button while an async action runs; toast on error.
 export async function busy(btn, fn) {
-  if (btn) btn.disabled = true;
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('busy');
+  }
   try {
     return await fn();
   } catch (e) {
     toast('操作失败：' + esc(e.message), 'error');
   } finally {
-    if (btn) btn.disabled = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove('busy');
+    }
   }
 }
 
-export async function copy(text) {
+export async function copy(text, btn) {
   try {
     await navigator.clipboard.writeText(text);
     toast('已复制', 'success', 1800);
+    if (btn) {
+      btn.classList.add('done');
+      setTimeout(() => btn.classList.remove('done'), 1600);
+    }
   } catch {
     toast('复制失败，请手动选中复制', 'warn');
   }

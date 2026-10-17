@@ -10,6 +10,7 @@ const { State } = require('./state');
 const { Compactor } = require('./compaction');
 const { Router } = require('./proxy');
 const { Prober } = require('./prober');
+const { Models } = require('./models');
 const { readCcSwitchProviders, ccSwitchDbPath } = require('./ccswitch');
 const { maskKey, truncate } = require('./util');
 const { CATEGORIES } = require('./classify');
@@ -36,8 +37,9 @@ function createApp({ dataDir = DATA_DIR } = {}) {
   const bus = new Bus(store);
   const state = new State(config, bus, dataDir);
   const compactor = new Compactor({ config, state, bus, store, dataDir });
-  const router = new Router({ config, state, bus, store, compactor });
-  const prober = new Prober({ config, state, bus, store });
+  const models = new Models({ config, state, bus });
+  const router = new Router({ config, state, bus, store, compactor, models });
+  const prober = new Prober({ config, state, bus, store, models });
   const sseClients = new Set();
 
   bus.on('push', (msg) => {
@@ -57,6 +59,7 @@ function createApp({ dataDir = DATA_DIR } = {}) {
     const mu = state.data.modelUnavailable[p.id] || {};
     return {
       ...p,
+      ...models.view(p),
       apiKey: undefined,
       apiKeyMasked: maskKey(p.apiKey),
       hasKey: !!p.apiKey,
@@ -278,7 +281,7 @@ function createApp({ dataDir = DATA_DIR } = {}) {
 
   let cleanupTimer = null;
   return {
-    config, store, bus, state, compactor, router, prober, server,
+    config, store, bus, state, compactor, router, prober, models, server,
     listen(port = s().port, host = s().host) {
       return new Promise((resolve, reject) => {
         server.once('error', reject);

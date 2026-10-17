@@ -1,4 +1,4 @@
-import { store, esc, api, fmtK, fmtMs, fmtTime, pname, modal, empty, CATEGORY_TEXT } from './core.js';
+import { store, esc, api, fmtK, fmtMs, fmtTime, pname, modal, empty, pageHead, CATEGORY_TEXT } from './core.js';
 import { icon } from './icons.js';
 
 let rows = [];
@@ -15,37 +15,43 @@ export function chainHtml(attempts) {
   }).join('')}</div>`;
 }
 
-function rowHtml(r, fresh) {
+function rowHtml(r, fresh, i = 0) {
   const ctx = r.compacted ? `${fmtK(r.est_tokens)} → ${fmtK(r.sent_tokens)}` : fmtK(r.est_tokens);
-  return `<tr class="click ${fresh ? 'fresh' : ''}" data-id="${r.id}">
-    <td class="faint small">${fmtTime(r.ts)}</td>
+  return `<tr class="click ${fresh ? 'fresh' : ''}" data-id="${r.id}" style="--i:${Math.min(i, 24)}">
+    <td class="faint small mono">${fmtTime(r.ts)}</td>
     <td>${r.client_compact ? '<span class="tag">客户端 /compact</span> ' : ''}${r.kind !== 'messages' ? `<span class="tag">${KIND[r.kind] || r.kind}</span> ` : ''}${esc((r.model || '-').replace(/^claude-/, ''))}</td>
     <td>${chainHtml(r.attempts)}</td>
-    <td class="small">${ctx}</td>
-    <td class="small">${fmtMs(r.duration_ms)}</td>
+    <td class="small mono">${ctx}</td>
+    <td class="small mono">${durBar(r.duration_ms)}</td>
     <td class="small mono">${r.input_tokens != null ? `${fmtK(r.input_tokens)} / ${fmtK(r.output_tokens)}` : '-'}</td>
   </tr>`;
 }
+
+// Duration as text plus a tiny log-scale bar (0.5s → 2min).
+const durBar = (ms) => ms == null ? '-' : `<span class="dur"><i style="background:var(${ms < 20000 ? '--ok' : ms < 90000 ? '--warn' : '--err'});transform:scaleX(${Math.min(1, Math.max(0.04, Math.log10(Math.max(ms, 500) / 500) / Math.log10(240))).toFixed(3)})"></i></span>${fmtMs(ms)}`;
 
 const qs = (extra = {}) => 'requests?' + new URLSearchParams({ limit: 100, ...Object.fromEntries(Object.entries({ ...filters, ...extra }).filter(([, v]) => v)) });
 
 export async function render(el) {
   el.innerHTML = `
-    <div class="head"><h1>请求记录</h1></div>
-    <div class="filters" role="search">
+    ${pageHead('requests', '<span class="tag" id="req-count">…</span>')}
+    <div class="filters" role="search" data-rv>
       <div class="chips" id="f-ok">${RESULT.map(([k, v]) => `<button data-v="${k}" class="${filters.ok === k ? 'on' : ''}">${v}</button>`).join('')}</div>
       <select id="f-kind" aria-label="类型">${Object.entries({ '': '全部类型', ...KIND }).map(([k, v]) => `<option value="${k}" ${filters.kind === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
       <select id="f-p" aria-label="线路"><option value="">全部线路</option>${store.status.providers.map((p) => `<option value="${p.id}" ${filters.providerId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
       <span class="grow"></span>
       <label class="search">${icon('search')}<input id="f-q" placeholder="搜索模型或错误" value="${esc(filters.q)}" aria-label="搜索" /></label>
     </div>
-    <div class="tablebox"><table>
+    <div class="tablebox" data-rv><table>
       <thead><tr><th>时间</th><th>模型</th><th>路由</th><th>上下文</th><th>耗时</th><th>输入 / 输出</th></tr></thead>
-      <tbody id="req-body"></tbody>
+      <tbody id="req-body" class="stagger">${skelRows()}</tbody>
     </table></div>
     <div class="row" style="justify-content:center;margin-top:14px"><button class="btn ghost" id="more">加载更多</button></div>`;
   const reload = async () => {
+    const tb = el.querySelector('#req-body');
+    if (tb && rows.length) tb.style.opacity = '.45';
     rows = await api(qs());
+    if (tb) tb.style.opacity = '';
     paint(el);
   };
   el.querySelector('#f-ok').onclick = (e) => {
@@ -69,9 +75,13 @@ export async function render(el) {
   await reload();
 }
 
+const skelRows = () => Array.from({ length: 8 }, (_, i) => `<tr style="--i:${i}">${[60, 120, 220, 70, 60, 90].map((w) => `<td><div class="skel" style="width:${w}px"></div></td>`).join('')}</tr>`).join('');
+
 function paint(el) {
   const tb = el.querySelector('#req-body');
-  if (tb) tb.innerHTML = rows.length ? rows.map((r) => rowHtml(r)).join('') : `<tr><td colspan="6">${empty('暂无记录')}</td></tr>`;
+  if (tb) tb.innerHTML = rows.length ? rows.map((r, i) => rowHtml(r, false, i)).join('') : `<tr><td colspan="6">${empty('暂无记录')}</td></tr>`;
+  const c = el.querySelector('#req-count');
+  if (c) c.textContent = `${rows.length} 条`;
 }
 
 export function onLive(el, r) {
@@ -91,7 +101,7 @@ export function onLive(el, r) {
 
 function detail(r) {
   if (!r) return;
-  const att = (r.attempts || []).map((a, i) => `<div class="attempt">
+  const att = (r.attempts || []).map((a, i) => `<div class="attempt ${a.skipped ? 'skip' : a.ok ? '' : 'bad'}" style="--i:${i}">
     <div class="row"><b>${i + 1}. ${esc(pname(a.providerId))}</b>
       ${a.skipped ? `<span class="pill">跳过</span><span class="muted small">${esc(a.reason)}</span>` : a.ok ? '<span class="pill ok">成功</span>' : `<span class="pill err">${esc(a.label || CATEGORY_TEXT[a.category] || '失败')}</span>`}
       ${a.variant === 'compacted' ? `<span class="tag">${icon('package')}发送摘要版</span>` : ''}
@@ -111,5 +121,5 @@ function detail(r) {
       <dt>tokens</dt><dd>输入 ${fmtK(r.input_tokens)}（缓存命中 ${fmtK(r.cache_read)}） · 输出 ${fmtK(r.output_tokens)}</dd>
       <dt>耗时</dt><dd>${fmtMs(r.duration_ms)}${r.ttfb_ms ? `，首字 ${fmtMs(r.ttfb_ms)}` : ''}</dd>
     </dl>
-    <h3 style="margin:18px 0 4px;font-size:14px">经过的线路</h3>${att || '<p class="muted">无</p>'}`);
+    <div class="subhead">经过的线路</div>${att || '<p class="muted">无</p>'}`);
 }

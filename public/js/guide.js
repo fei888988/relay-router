@@ -1,4 +1,5 @@
-import { store, esc, api, refreshStatus, copy, busy, toast } from './core.js';
+import { store, esc, api, refreshStatus, copy, busy, toast, ask, pageHead } from './core.js';
+import { reveal } from './fx.js';
 import { icon } from './icons.js';
 
 export function render(el) {
@@ -6,9 +7,9 @@ export function render(el) {
   const s = st.settings;
   const field = (label, v) => `<div class="small muted" style="margin-top:10px">${label}</div><div class="copy"><code>${esc(v)}</code><button class="btn sm" data-copy="${esc(v)}">${icon('copy')}复制</button></div>`;
   el.innerHTML = `
-    <div class="head"><h1>接入指南</h1></div>
+    ${pageHead('guide')}
     <div class="cols2">
-      <section class="card">
+      <section class="card hud" data-rv>
         <div class="card-title"><h3>三步接入</h3></div>
         <ol class="steps">
           <li><b>在 CC Switch 添加供应商</b><span class="muted small">Claude → 添加 → 自定义，名称随意</span>
@@ -17,7 +18,7 @@ export function render(el) {
           <li style="padding-bottom:0"><b>切换过去，重开 Claude Code</b><span class="muted small">在「请求记录」能看到每个请求走了哪条线路</span></li>
         </ol>
       </section>
-      <section class="card">
+      <section class="card hud" data-rv>
         <div class="card-title"><h3>常驻运行</h3></div>
         <ul class="rules">
           <li><code>start.bat</code>：前台运行，关窗口即停止</li>
@@ -33,19 +34,20 @@ export function render(el) {
         </ul>
       </section>
     </div>
-    <section class="card" style="margin-top:14px">
-      <div class="row"><span class="grow small muted">${icon('key')} 只监听本机 ${esc(s.host)}，所有请求都要带路由密钥，防止其他程序盗用额度。${s.requireKey ? '' : '<b style="color:var(--err)">当前已关闭密钥校验</b>'}</span>
+    <section class="card" style="margin-top:16px" data-rv>
+      <div class="keybar"><span class="ic">${icon('key')}</span><span class="grow small muted">只监听本机 ${esc(s.host)}，所有请求都要带路由密钥，防止其他程序盗用额度。${s.requireKey ? '' : '<b style="color:var(--err)">当前已关闭密钥校验</b>'}</span>
       <button class="btn sm danger" id="regen">重新生成密钥</button></div>
     </section>`;
   el.onclick = async (e) => {
     const c = e.target.closest('[data-copy]');
-    if (c) copy(c.dataset.copy);
+    if (c) copy(c.dataset.copy, c);
     if (e.target.closest('#regen')) {
-      if (!confirm('旧密钥会立即失效，需要同步更新 CC Switch。确定吗？')) return;
+      if (!(await ask('旧密钥会立即失效，需要同步更新 CC Switch。确定吗？', { ok: '重新生成', danger: true }))) return;
       await busy(e.target.closest('#regen'), async () => {
         await api('regenerate-key', { method: 'POST' });
         await refreshStatus();
         render(el);
+        reveal(el);
         toast('已生成新密钥，记得更新 CC Switch', 'warn', 8000);
       });
     }

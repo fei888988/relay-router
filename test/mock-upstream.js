@@ -15,8 +15,9 @@ function sseBody(text, usage) {
 }
 
 // behavior(ctx) -> { status, json } | { sse: text } | { raw, status, headers } | 'hang'
-function createMock(name, behavior) {
+function createMock(name, behavior, models = null) {
   const calls = [];
+  const modelCalls = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -26,8 +27,13 @@ function createMock(name, behavior) {
         body = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null');
       } catch {}
       const ctx = { name, method: req.method, path: req.url, headers: req.headers, body, n: calls.length };
-      calls.push(ctx);
-      const out = mock.behavior(ctx);
+      const discovery = req.method === 'GET' && req.url === '/v1/models';
+      (discovery ? modelCalls : calls).push(ctx);
+      const out = discovery
+        ? typeof mock.models === 'function' ? mock.models(ctx)
+          : mock.models == null ? err(404, 'not_found_error', 'No catalog')
+            : { json: { data: mock.models.map((id) => ({ id })) } }
+        : mock.behavior(ctx);
       if (out === 'disconnect') return req.socket.destroy();
       if (out === 'hang') return;
       if (out.sse != null) {
@@ -47,6 +53,8 @@ function createMock(name, behavior) {
   const mock = {
     name,
     calls,
+    modelCalls,
+    models,
     behavior,
     server,
     url: null,

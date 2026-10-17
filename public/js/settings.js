@@ -1,4 +1,4 @@
-import { store, esc, api, refreshStatus, toast, busy } from './core.js';
+import { store, esc, api, refreshStatus, toast, busy, pageHead } from './core.js';
 import { icon } from './icons.js';
 
 const num = (name, label, v, { hint = '', step = 1, unit = '' } = {}) =>
@@ -14,10 +14,10 @@ export function render(el) {
   const s = store.status.settings;
   const c = s.compaction;
   el.innerHTML = `
-    <div class="head"><h1>设置</h1></div>
+    ${pageHead('settings')}
     <form id="set-form">
       <div class="cols2">
-        <section class="card"><div class="card-title"><h3>故障切换</h3></div><div class="fields">
+        <section class="card hud mod" data-rv><div class="card-title"><span class="no">M-01</span><h3>故障切换</h3></div><div class="fields">
           ${num('failureThreshold', '连续失败几次后下线', s.failureThreshold, { hint: '额度不足、令牌无效会立即下线' })}
           ${num('probeIntervalMin', '下线后探测间隔', s.probeIntervalMin, { unit: '分钟' })}
           ${num('cooldownSec', '限流冷却', s.cooldownSec, { unit: '秒' })}
@@ -25,8 +25,10 @@ export function render(el) {
           ${num('cacheTtlSec', '会话缓存有效期', s.cacheTtlSec, { unit: '秒', hint: '按线路、会话和发送版本记忆最近成功时间' })}
           ${num('f.minTokens', '缓存保护起点', s.costAwareFailover.minTokens, { unit: 'tokens', hint: '大请求切到冷缓存前，临时故障优先原线路重试' })}
           ${num('f.extraRetries', '缓存保护额外重试', s.costAwareFailover.extraRetries, { unit: '次', hint: '0 关闭；退避 1.5 秒、4 秒；不占普通最多尝试次数' })}
+          ${sw('sizeFailover', '超限时允许切换到更贵的线路', s.sizeFailover)}
+          <span class="hint">关闭时，请求体或上下文超限会留在原线路，交给 Claude Code 自己压缩，不把完整历史发到冷缓存线路</span>
         </div></section>
-        <section class="card"><div class="card-title"><h3>会话压缩</h3></div><div class="fields">
+        <section class="card hud mod" data-rv><div class="card-title"><span class="no">M-02</span><h3>会话压缩</h3></div><div class="fields">
           ${sw('c.enabled', '开启会话压缩', c.enabled)}
           ${sw('c.compactOnFailover', '切换线路时沿用已有摘要', c.compactOnFailover)}
           <span class="hint">可用于未开启压缩的目标线路以减少缓存写入；客户端 /compact 始终优先完整历史</span>
@@ -39,7 +41,7 @@ export function render(el) {
             ${store.status.providers.map((p) => `<option value="${p.id}" ${c.summarizerProviderId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
         </div></section>
       </div>
-      <details class="card fold" style="margin-top:14px"><summary>${icon('chev', 'chev')}高级设置</summary><div class="fold-body">
+      <details class="card hud fold mod" style="margin-top:16px" data-rv><summary>${icon('chev', 'chev')}<span class="no" style="font:700 13px var(--mono);color:var(--sig);letter-spacing:.1em">M-03</span>高级设置</summary><div class="fold-body">
         <div class="fields">
           ${num('maxAttempts', '单个请求最多尝试', s.maxAttempts, { unit: '次' })}
           ${num('modelUnavailableTtlMin', '"无此模型"记忆时长', s.modelUnavailableTtlMin, { unit: '分钟' })}
@@ -53,13 +55,20 @@ export function render(el) {
           ${sw('saveErrorBodies', '保存原始错误响应', s.saveErrorBodies)}
           ${sw('requireKey', '校验路由密钥（建议开启）', s.requireKey)}
         </div>
-        <h3 style="font-size:13px;margin:22px 0 4px">错误识别关键词</h3>
+        <div class="subhead">错误识别关键词</div>
         <p class="hint" style="margin:0 0 12px">每行一个，不区分大小写。遇到没识别出来的报错，把它的关键字加进来。</p>
         <div class="fields">${Object.entries(PATTERNS).map(([k, label]) => `<div class="f"><label for="p-${k}">${label}</label><textarea id="p-${k}" name="p.${k}" rows="6">${esc((s.patterns[k] || []).join('\n'))}</textarea></div>`).join('')}</div>
       </div></details>
-      <div class="savebar"><button class="btn primary" type="submit">保存</button><span class="muted small">保存后立即生效</span></div>
+      <div class="savebar" id="savebar"><button class="btn primary" type="submit">保存</button><span class="muted small" id="save-hint">保存后立即生效</span></div>
     </form>`;
-  el.querySelector('#set-form').onsubmit = async (e) => {
+  const form = el.querySelector('#set-form');
+  const bar = el.querySelector('#savebar');
+  const hint = el.querySelector('#save-hint');
+  form.oninput = () => {
+    bar.classList.add('dirty');
+    hint.textContent = '有未保存的修改';
+  };
+  form.onsubmit = async (e) => {
     e.preventDefault();
     const patch = { compaction: {}, costAwareFailover: {}, patterns: {} };
     for (const inp of e.target.querySelectorAll('[name]')) {
@@ -72,6 +81,8 @@ export function render(el) {
     await busy(e.submitter, async () => {
       await api('settings', { method: 'POST', body: patch });
       await refreshStatus();
+      bar.classList.remove('dirty');
+      hint.textContent = '已保存，立即生效';
       toast('已保存', 'success');
     });
   };
