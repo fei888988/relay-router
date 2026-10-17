@@ -58,4 +58,4 @@ npm test
 
 ## 许可证
 
-仓库当前未附带许可证文件。
+本项目采用 Zero-Clause BSD（0BSD）许可证，见 [LICENSE](LICENSE)。

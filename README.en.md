@@ -58,4 +58,4 @@ For additional details on model discovery and routing, see [MODELS.md](MODELS.md
 
 ## License
 
-This repository does not currently include a license file.
+This project is licensed under the Zero-Clause BSD (0BSD) License. See [LICENSE](LICENSE).

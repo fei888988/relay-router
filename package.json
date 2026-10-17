@@ -1,6 +1,7 @@
 {
   "name": "claude-smart-router",
   "version": "1.0.0",
+  "license": "0BSD",
   "description": "Local smart router for Claude Code relay stations (priority failover, health probes, context-aware compaction, web panel)",
   "private": true,
   "type": "commonjs",
