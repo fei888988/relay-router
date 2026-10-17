@@ -1,0 +1,21 @@
+# Dependencies
+/node_modules/
+
+# Local runtime state, provider credentials, endpoints, and request logs
+/data/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Runtime logs and databases
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
