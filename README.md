@@ -1,5 +1,7 @@
 # RelayRouter（中转站智能路由）
 
+[简体中文](README.md) | [English](README.en.md)
+
 RelayRouter 是一个运行在本机的 Claude Code API 路由器。它把多个兼容 Anthropic Messages API 的中转线路接入一个本地地址，并按优先级转发请求；线路异常时可以自动重试、切换和恢复。
 
 ## 功能
