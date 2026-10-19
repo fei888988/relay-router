@@ -222,6 +222,13 @@ export async function render(el, { quiet = false } = {}) {
   if (quiet && document.querySelector('dialog[open]')) return;
   try {
     cx = store.codex = await api('codex/status');
+    if (store.status) {
+      store.status.codex = {
+        accounts: cx.accounts.length,
+        available: cx.accounts.filter((a) => a.enabled && a.status === 'ok').length,
+      };
+      window.dispatchEvent(new Event('smart-router:codex-status-updated'));
+    }
   } catch (e) {
     const stale = /not found|HTTP 404/i.test(e.message);
     el.innerHTML = `${pageHead('codex')}<div class="notice err">${icon('alert')}${stale

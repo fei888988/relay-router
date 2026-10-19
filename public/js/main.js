@@ -108,6 +108,7 @@ function drawNav() {
   placeInd();
   if (!nav.classList.contains('ready')) requestAnimationFrame(() => requestAnimationFrame(() => nav.classList.add('ready')));
 }
+addEventListener('smart-router:codex-status-updated', drawNav);
 addEventListener('resize', placeInd);
 document.fonts?.ready.then(placeInd);
 
