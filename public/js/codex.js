@@ -379,7 +379,12 @@ async function openImport(el) {
     await busy(e.target, async () => {
       const r = await api('codex/import', { method: 'POST', body: { ids } });
       toast(`新增 ${r.added || 0} 个，更新 ${r.updated || 0} 个`, 'success');
-      closeModal();
+      const dialog = document.getElementById('modal');
+      if (dialog?.open) {
+        const closed = new Promise((resolve) => dialog.addEventListener('close', resolve, { once: true }));
+        closeModal();
+        await closed;
+      }
       await render(el, { quiet: true });
     });
   };
