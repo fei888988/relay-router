@@ -1,19 +1,28 @@
-import { api, empty, pageHead } from './core.js';
+import { api, empty, pageHead, store } from './core.js';
 import { feedItem } from './overview.js';
 
 // Filter groups shown as chips; each maps to one or more event types.
-const GROUPS = [
+const CODEX_GROUPS = [
+  ['', '全部'], ['codex_switch', '换号'], ['codex_exhaustion,codex_recovery', '额度'], ['codex_auth,codex_sync', '登录与同步'],
+];
+const CLAUDE_GROUPS = [
   ['', '全部'], ['switch', '切换'], ['down,recover,cooldown', '上下线'], ['compaction,learn', '压缩'], ['probe', '探测'], ['config,settings,mode,reset,model,start', '其他'],
 ];
 let group = '';
+let shownApp = null;
+const isCodex = () => store.app === 'codex';
+// Each app sees only its own telemetry.
+const mine = (e) => String(e.type).startsWith('codex_') === isCodex();
 let level = '';
 let list = [];
 
-const matches = (e) => (!group || group.split(',').includes(e.type)) && (!level || e.level === level);
+const matches = (e) => mine(e) && (!group || group.split(',').includes(e.type)) && (!level || e.level === level);
 
 export async function render(el) {
+  if (shownApp !== store.app) (group = ''), (shownApp = store.app);
+  const GROUPS = isCodex() ? CODEX_GROUPS : CLAUDE_GROUPS;
   el.innerHTML = `
-    ${pageHead('events', '<span class="tag" id="ev-count">…</span>')}
+    ${pageHead(isCodex() ? 'codex-events' : 'events', '<span class="tag" id="ev-count">…</span>')}
     <div class="filters" data-rv>
       <div class="chips" id="e-g">${GROUPS.map(([k, v]) => `<button data-v="${k}" class="${group === k ? 'on' : ''}">${v}</button>`).join('')}</div>
       <span class="grow"></span>
@@ -47,10 +56,11 @@ function paint(el) {
     box.querySelectorAll('li').forEach((li, i) => li.style.setProperty('--i', Math.min(i, 30)));
   }
   const c = el.querySelector('#ev-count');
-  if (c) c.textContent = `${shown.length} / ${list.length}`;
+  if (c) c.textContent = `${shown.length} / ${list.filter(mine).length}`;
 }
 
 export function onLive(el, e) {
+  if (!mine(e)) return;
   list.unshift(e);
   if (!matches(e)) return;
   const box = el.querySelector('#ev-list');

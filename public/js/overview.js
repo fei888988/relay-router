@@ -253,7 +253,7 @@ function patch(el, st, m) {
 
 async function feed(el, live) {
   try {
-    const evs = (await api('events?limit=30')).filter((e) => e.type !== 'probe').slice(0, 8);
+    const evs = (await api('events?limit=30')).filter((e) => e.type !== 'probe' && !String(e.type).startsWith('codex_')).slice(0, 8);
     const box = el.querySelector('#ov-feed');
     if (!box) return;
     const top = evs[0]?.id || 0;

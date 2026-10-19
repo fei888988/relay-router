@@ -11,6 +11,6 @@
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/index.js",
-    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 test/router.test.js"
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 test/router.test.js test/codex.test.js"
   }
 }

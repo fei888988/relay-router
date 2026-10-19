@@ -11,6 +11,7 @@ const { Compactor } = require('./compaction');
 const { Router } = require('./proxy');
 const { Prober } = require('./prober');
 const { Models } = require('./models');
+const { CodexRouter } = require('./codex');
 const { readCcSwitchProviders, ccSwitchDbPath } = require('./ccswitch');
 const { maskKey, truncate } = require('./util');
 const { CATEGORIES } = require('./classify');
@@ -40,6 +41,7 @@ function createApp({ dataDir = DATA_DIR } = {}) {
   const models = new Models({ config, state, bus });
   const router = new Router({ config, state, bus, store, compactor, models });
   const prober = new Prober({ config, state, bus, store, models });
+  const codex = new CodexRouter({ config, state, bus, store, checkKey: (req) => router.checkKey(req) });
   const sseClients = new Set();
 
   bus.on('push', (msg) => {
@@ -91,6 +93,7 @@ function createApp({ dataDir = DATA_DIR } = {}) {
       categories: CATEGORIES,
       ccSwitchDb: ccSwitchDbPath(),
       baseUrl: `http://${s().host}:${s().port}`,
+      codex: codex.summary(),
     };
   }
 
@@ -100,6 +103,8 @@ function createApp({ dataDir = DATA_DIR } = {}) {
     if (m !== 'GET' && req.headers['x-panel'] !== '1') return json(res, 403, { error: 'forbidden' });
     const q = Object.fromEntries(url.searchParams);
     const body = m === 'GET' ? {} : await readJson(req).catch(() => ({}));
+    if (parts[0] === 'codex') return json(res, 200, await codex.api(m, parts.slice(1), body,
+      `http://${req.headers.host}/codex/v1`));
     const prov = (id) => {
       const p = config.provider(id);
       if (!p) throw Object.assign(new Error('中转站不存在'), { status: 404 });
@@ -261,6 +266,7 @@ function createApp({ dataDir = DATA_DIR } = {}) {
       return res.end();
     }
     try {
+      if (url.pathname.startsWith('/codex/v1/')) return await codex.handle(req, res, url);
       if (url.pathname.startsWith('/v1/')) return await router.handle(req, res, url);
       if (!hostOk(req)) {
         res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
@@ -275,18 +281,24 @@ function createApp({ dataDir = DATA_DIR } = {}) {
       else res.end();
     }
   });
+  server.on('upgrade', (req, socket) => {
+    if (!req.url.startsWith('/codex/v1/')) return socket.destroy();
+    // Codex falls back to Responses over HTTP when WebSocket negotiation fails.
+    socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+  });
   server.requestTimeout = 0;
   server.headersTimeout = 60000;
   server.keepAliveTimeout = 65000;
 
   let cleanupTimer = null;
   return {
-    config, store, bus, state, compactor, router, prober, models, server,
+    config, store, bus, state, compactor, router, prober, models, codex, server,
     listen(port = s().port, host = s().host) {
       return new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(port, host, () => {
           prober.start();
+          codex.start();
           store.cleanup(s().logRetentionDays);
           cleanupTimer = setInterval(() => store.cleanup(s().logRetentionDays), 6 * 3600000);
           state.data.activeProviderId = (state.activeProvider() || {}).id || null;
@@ -296,6 +308,7 @@ function createApp({ dataDir = DATA_DIR } = {}) {
     },
     async close() {
       prober.stop();
+      await codex.stop();
       clearInterval(cleanupTimer);
       for (const c of sseClients) c.end();
       state.save(true);

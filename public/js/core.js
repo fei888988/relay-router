@@ -67,21 +67,55 @@ export function providerStatus(p) {
 export const pill = (cls, text) => `<span class="pill ${cls}"><span class="d"></span>${text}</span>`;
 export const empty = (text, ic = 'inbox') => `<div class="empty"><div class="radar">${icon(ic)}</div>${text}</div>`;
 
-// Page registry: id, 中文名, icon, English code shown in the top bar.
-export const PAGES = [
-  ['overview', '概览', 'grid', 'OVERVIEW'],
-  ['requests', '请求记录', 'list', 'REQUEST LOG'],
-  ['events', '事件日志', 'bell', 'TELEMETRY'],
-  ['sessions', '会话压缩', 'layers', 'COMPACTION'],
-  ['providers', '中转站', 'server', 'RELAYS'],
-  ['settings', '设置', 'sliders', 'CONTROLS'],
-  ['guide', '接入指南', 'book', 'HANDBOOK'],
-];
+// Two equal workspaces, switched as a whole from the top bar (like CC Switch's app switch).
+// Page registry per app: id, 中文名, icon, English code shown in the top bar.
+export const APPS = {
+  claude: {
+    name: 'Claude', code: 'CLAUDE', pages: [
+      ['overview', '概览', 'grid', 'OVERVIEW'],
+      ['requests', '请求记录', 'list', 'REQUEST LOG'],
+      ['events', '事件日志', 'bell', 'TELEMETRY'],
+      ['sessions', '会话压缩', 'layers', 'COMPACTION'],
+      ['providers', '中转站', 'server', 'RELAYS'],
+      ['settings', '设置', 'sliders', 'CONTROLS'],
+      ['guide', '接入指南', 'book', 'HANDBOOK'],
+    ],
+  },
+  codex: {
+    name: 'Codex', code: 'CODEX', pages: [
+      ['codex', '账号', 'grid', 'ACCOUNTS'],
+      ['codex-requests', '请求记录', 'list', 'REQUEST LOG'],
+      ['codex-events', '事件日志', 'bell', 'TELEMETRY'],
+      ['codex-guide', '接入指南', 'book', 'HANDBOOK'],
+    ],
+  },
+};
+export const appOf = (page) => Object.keys(APPS).find((k) => APPS[k].pages.some((p) => p[0] === page)) || null;
+store.app = appOf(location.hash.slice(1)) || (localStorage.getItem('sr-app') === 'codex' ? 'codex' : 'claude');
+// Live binding: modules importing PAGES always see the current app's pages.
+export let PAGES = APPS[store.app].pages;
+export function setApp(app) {
+  store.app = APPS[app] ? app : 'claude';
+  PAGES = APPS[store.app].pages;
+  localStorage.setItem('sr-app', store.app);
+  document.body.dataset.app = store.app;
+}
+document.body.dataset.app = store.app;
+
+// Compact count: 999 → 999, 1234 → 1.2k, 12345 → 12k, 1.5e6 → 1.5m.
+export function fmtCount(n) {
+  n = Number(n) || 0;
+  const unit = (v, u) => (v < 10 ? v.toFixed(1).replace(/\.0$/, '') : String(Math.floor(v))) + u;
+  if (n >= 1e6) return unit(n / 1e6, 'm');
+  if (n >= 1000) return unit(n / 1000, 'k');
+  return String(n);
+}
 
 // Editorial page header: outlined index numeral + eyebrow + title + actions.
 export function pageHead(id, acts = '', extra = '') {
-  const i = PAGES.findIndex((p) => p[0] === id);
-  const [, name, , code] = PAGES[i];
+  const pages = APPS[appOf(id) || store.app].pages;
+  const i = pages.findIndex((p) => p[0] === id);
+  const [, name, , code] = pages[i];
   return `<div class="head" data-rv><span class="idx" aria-hidden="true">${String(i + 1).padStart(2, '0')}</span>
     <div class="ttl"><span class="eyebrow">${code}</span><h1>${name}${extra}</h1></div>
     ${acts ? `<div class="acts">${acts}</div>` : ''}</div>`;

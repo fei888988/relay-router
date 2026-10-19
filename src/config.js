@@ -155,7 +155,11 @@ class Config {
     settings.patterns = mergeDefaults(DEFAULT_PATTERNS, settings.patterns || {});
     if (!settings.routerKey) settings.routerKey = 'sr-' + randomId(18);
     if (process.env.SMART_ROUTER_PORT) settings.port = parseInt(process.env.SMART_ROUTER_PORT, 10);
-    this.data = { settings, providers: (raw.providers || []).map(normalizeProvider) };
+    this.data = { settings, providers: (raw.providers || []).map(normalizeProvider), codex: {
+      mode: raw.codex?.mode === 'pinned' ? 'pinned' : 'auto',
+      pinnedAccountId: raw.codex?.pinnedAccountId || null,
+      accounts: (raw.codex?.accounts || []).map((a) => ({ ...a, enabled: a.enabled !== false })),
+    } };
     if (fresh || !raw.settings || !raw.settings.routerKey) this.save();
     return this;
   }

@@ -252,3 +252,33 @@ body.booting [data-rv], body.booting .topbar, body.booting .dock { animation-pla
   html:not(.force-motion) *, html:not(.force-motion) *::before, html:not(.force-motion) *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
   html:not(.force-motion) .fx-aurora, html:not(.force-motion) .fx-light { display: none; }
 }
+
+/* ---------- Apps: Claude / Codex are equal workspaces ---------- */
+/* Codex re-tints the signal colour so you always know which side you're on. */
+body[data-app="codex"] { --sig: #7cc4ff; --sig-rgb: 124, 196, 255; --sig-ink: #021220; --sig-soft: rgba(124, 196, 255, 0.1); --accent: var(--sig); --accent-soft: var(--sig-soft); }
+.appsw {
+  position: relative; display: inline-grid; grid-auto-flow: column; grid-auto-columns: 1fr; padding: 3px; margin-left: 4px;
+  border-radius: 999px; background: rgba(0,0,0,.5); border: 1px solid var(--line-2); box-shadow: inset 0 2px 8px rgba(0,0,0,.6);
+}
+.appsw .knob {
+  position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 3px); border-radius: 999px; background: #d4ff3a;
+  box-shadow: 0 0 18px -3px rgba(212,255,58,.6), inset 0 1px 0 rgba(255,255,255,.5); transition: transform .5s var(--e-spring), background .35s, box-shadow .35s;
+}
+.appsw.codex .knob { transform: translateX(100%); background: #7cc4ff; box-shadow: 0 0 18px -3px rgba(124,196,255,.65), inset 0 1px 0 rgba(255,255,255,.5); }
+.appsw button {
+  position: relative; z-index: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 30px; padding: 0 16px;
+  border: 0; border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; font: 650 13px var(--f-sans); letter-spacing: .02em; transition: color .3s;
+}
+.appsw button.on { color: #0b0f00; cursor: default; }
+.appsw.codex button.on { color: #021220; }
+.appsw button:not(.on):hover { color: var(--text); }
+.appsw button:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.appsw .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--off); }
+.appsw .dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.appsw .dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
+.appsw button.on .dot.ok { background: currentColor; box-shadow: none; }
+.view.leaving.swap { animation: app-out .26s var(--e-io) forwards; }
+@keyframes app-out { to { opacity: 0; transform: translateX(-24px); filter: blur(4px); } }
+.crumb #crumb-a { color: var(--text); }
+@media (max-width: 640px) { .appsw button { padding: 0 11px; font-size: 12px; } }
+@media (max-width: 520px) { .brand-t { display: none; } }
