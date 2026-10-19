@@ -1,11 +1,11 @@
 'use strict';
-// Official ChatGPT accounts have their own priority queue, credentials and health.
+// ChatGPT accounts and Responses-compatible relays share priority and health.
 const http = require('node:http');
 const https = require('node:https');
 const { pipeline } = require('node:stream/promises');
 const { Transform } = require('node:stream');
 const { randomId, maskKey } = require('./util');
-const { readCcSwitchCodexAccounts, jwtPayload, codexIdentity } = require('./ccswitch');
+const { readCcSwitchCodexAccounts, readCcSwitchCodexRelays, jwtPayload, codexIdentity } = require('./ccswitch');
 const { tokenExp, writeCcSwitch, readAuthFile, writeAuthFile } = require('./codex-sync');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -18,7 +18,8 @@ function headers(input, account) {
   const drop = new Set([...hop, ...String(input.connection || '').toLowerCase().split(',').map((s) => s.trim())]);
   if (account) for (const k of ['authorization', 'chatgpt-account-id', 'x-api-key', 'x-panel']) drop.add(k);
   const out = Object.fromEntries(Object.entries(input).filter(([k, v]) => !drop.has(k.toLowerCase()) && v !== undefined));
-  if (account) Object.assign(out, { authorization: 'Bearer ' + account.tokens.access_token, 'chatgpt-account-id': account.accountId });
+  if (account?.type === 'relay') out.authorization = 'Bearer ' + account.apiKey;
+  else if (account) Object.assign(out, { authorization: 'Bearer ' + account.tokens.access_token, 'chatgpt-account-id': account.accountId });
   return out;
 }
 function send(res, status, obj) {
@@ -81,11 +82,12 @@ class CodexRouter {
   get configData() { return this.config.data.codex; }
   get accounts() { return this.configData.accounts; }
   health(a) { return this.runtime.accounts[a.id] ||= {}; }
-  event(type, a, message) { this.bus.log(type === 'auth' ? 'error' : 'info', 'codex_' + type, message, a?.id); this.bus.stateChanged(); }
+  event(type, a, message) { this.bus.log(type === 'auth' ? 'error' : 'info', 'codex_' + type, this.redact(message), a?.id); this.bus.stateChanged(); }
   statusOf(a) {
     const h = this.health(a);
     if (!a.enabled) return 'disabled';
     if (h.auth) return 'auth';
+    if (a.type === 'relay') return h.cooldownUntil ? 'cooldown' : 'ok';
     if (h.exhaustedUntil > Date.now()) return 'exhausted';
     if (h.cooldownUntil > Date.now()) return 'cooldown';
     if (h.exhaustedUntil) {
@@ -107,6 +109,7 @@ class CodexRouter {
   candidates() { return this.ordered().filter((a) => this.statusOf(a) === 'ok'); }
   summary() { const list = this.candidates(); return { activeAccountId: list[0]?.id || null, accounts: this.accounts.length, available: list.length }; }
   binding(a, rows) {
+    if (a.type === 'relay') return null;
     if (!a.ccSwitchId) {
       const matches = rows.filter((x) => x.accountId === a.accountId);
       if (matches.length === 1) { a.ccSwitchId = matches[0].id; this.config.save(); }
@@ -129,7 +132,7 @@ class CodexRouter {
     this.syncState(a).lastError = message;
     this.bus.log('warn', 'codex_sync', message, a.id); this.bus.stateChanged(); this.state.save();
   }
-  readSyncRows(accounts = this.accounts) {
+  readSyncRows(accounts = this.accounts.filter((a) => a.type !== 'relay')) {
     return readCcSwitchCodexAccounts(() => { for (const a of accounts) this.syncFailure(a, '读取 CC Switch'); }, true);
   }
   backupCcSwitch(file) {
@@ -143,7 +146,9 @@ class CodexRouter {
     this.runtime.ccSwitchBackupPath = backup;
     this.state.save(true);
   }
-  syncAccount(a, rows = this.readSyncRows([a])) {
+  syncAccount(a, rows) {
+    if (a.type === 'relay') return;
+    rows ||= this.readSyncRows([a]);
     try { this.performSync(a, rows); }
     catch { this.syncFailure(a, '同步凭据'); }
   }
@@ -184,12 +189,16 @@ class CodexRouter {
     const rows = this.readSyncRows(); // One read-only database open per tick, shared by all accounts.
     for (const a of this.accounts) this.syncAccount(a, rows);
   }
-  view(a, rows = this.readSyncRows([a])) {
+  view(a, rows = a.type === 'relay' ? [] : this.readSyncRows([a])) {
     const h = this.health(a), status = this.statusOf(a);
     const source = this.binding(a, rows);
     const stats = this.store.db.prepare(`SELECT COUNT(*) AS requests24h, COALESCE(SUM(input_tokens),0) AS inputTokens24h,
       COALESCE(SUM(output_tokens),0) AS outputTokens24h FROM requests WHERE kind='codex' AND provider_id=? AND ts>=?`).get(a.id, Date.now() - 86400000);
-    return { id: a.id, name: a.name, email: a.email || '', planType: h.planType || a.planType || '', accountIdMasked: maskKey(a.accountId),
+    if (a.type === 'relay') return this.redact({ id: a.id, name: a.name, type: 'relay', enabled: a.enabled, status,
+      until: h.cooldownUntil || null, reason: h.lastError || null, baseUrl: a.baseUrl, model: a.model || '',
+      keyHint: maskKey(a.apiKey), ...(a.ccSwitchId ? { ccSwitchId: a.ccSwitchId } : {}), requests24h: stats.requests24h, stats,
+      active: this.summary().activeAccountId === a.id }, [], false);
+    return { id: a.id, name: a.name, type: 'chatgpt', email: a.email || '', planType: h.planType || a.planType || '', accountIdMasked: maskKey(a.accountId),
       enabled: a.enabled, status, statusDetail: { ok: '可用', exhausted: '额度用尽', auth: '需要重新登录', cooldown: '冷却中', disabled: '已停用' }[status],
       exhaustedUntil: h.exhaustedUntil || null, usage: h.usage || null, tokenExpiresAt: expires(a), lastUsedAt: h.lastUsedAt || null,
       lastError: h.lastError || null, stats, ccSwitchId: a.ccSwitchId || null, bound: !!source,
@@ -203,7 +212,7 @@ class CodexRouter {
     return { mode: this.configData.mode, pinnedAccountId: this.configData.pinnedAccountId, activeAccountId: this.summary().activeAccountId,
       endpoint, routerKeySet: !!this.config.settings.routerKey, accounts: this.accounts.map((a) => this.view(a, rows)), recent };
   }
-  reset(a) { Object.assign(this.health(a), { auth: false, exhaustedUntil: null, cooldownUntil: null, lastError: null }); this.state.save(); this.bus.stateChanged(); }
+  reset(a) { Object.assign(this.health(a), { auth: false, exhaustedUntil: null, cooldownUntil: null, failures: 0, lastError: null }); this.state.save(); this.bus.stateChanged(); }
   adopt(a, source) {
     a.tokens = { ...source.tokens };
     Object.assign(a, codexIdentity(a.tokens));
@@ -277,6 +286,7 @@ class CodexRouter {
     });
   }
   async authorized(a, url, method, clientHeaders, body, signal) {
+    if (a.type === 'relay') return this.request(url, method, headers(clientHeaders, a), body, signal);
     if (expires(a) <= Date.now() + 300000) await this.refresh(a);
     const token = a.tokens.access_token;
     let response = await this.request(url, method, headers(clientHeaders, a), body, signal);
@@ -344,12 +354,12 @@ class CodexRouter {
     work.finally(() => this.probes.delete(a.id)).catch(() => {});
     return work;
   }
-  redact(value) {
-    const secrets = this.accounts.flatMap((a) => Object.values(a.tokens || {}));
+  redact(value, extraSecrets = [], maskFields = true) {
+    const secrets = [...extraSecrets, ...this.accounts.flatMap((a) => [...Object.values(a.tokens || {}), a.apiKey])].filter(Boolean);
     const walk = (v) => {
       if (typeof v === 'string') { for (const secret of secrets) if (secret) v = v.split(secret).join('[masked]'); return v; }
       if (Array.isArray(v)) return v.map(walk);
-      if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, /token|authorization/i.test(k) ? '[masked]' : walk(x)]));
+      if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, maskFields && /token|authorization|apiKey/i.test(k) ? '[masked]' : walk(x)]));
       return v;
     };
     return walk(value);
@@ -363,6 +373,10 @@ class CodexRouter {
   tick() {
     for (const a of this.accounts) {
       const h = this.health(a);
+      if (a.type === 'relay') {
+        if (a.enabled && !h.auth && h.cooldownUntil && h.cooldownUntil <= Date.now()) this.testRelay(a).catch(() => {});
+        continue;
+      }
       if (a.enabled && !h.auth && h.exhaustedUntil && (h.nextProbeAt || 0) <= Date.now()) this.usage(a).catch(() => {});
     }
   }
@@ -372,21 +386,80 @@ class CodexRouter {
     for (const controller of this.controllers) controller.abort();
     await Promise.allSettled([...this.probes.values(), ...this.refreshes.values()]);
   }
+  relaySources() { return readCcSwitchCodexRelays(this.config.settings.port); }
+  relayFields(body) {
+    if (typeof body.name !== 'string' || !body.name.trim()) throw fail(400, '名称不能为空');
+    if (typeof body.apiKey !== 'string' || !body.apiKey.trim()) throw fail(400, 'API 密钥不能为空');
+    let url;
+    try { url = new URL(body.baseUrl); } catch { throw fail(400, '请输入有效的 HTTP(S) 地址'); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw fail(400, '请输入有效的 HTTP(S) 地址（不能包含凭据、查询或片段）');
+    if (body.model !== undefined && typeof body.model !== 'string') throw fail(400, '模型必须为字符串');
+    return { name: body.name.trim(), baseUrl: url.href.replace(/\/+$/, ''), apiKey: body.apiKey.trim(), model: body.model?.trim() || '' };
+  }
+  relayFailure(a, status, input = {}) {
+    const h = this.health(a);
+    if ([401, 403].includes(status)) {
+      h.auth = true; h.cooldownUntil = null; h.lastError = '中转认证失败，请检查 API 密钥';
+      this.event('auth', a, h.lastError);
+    } else {
+      h.failures = (h.failures || 0) + 1;
+      const retry = input['retry-after'];
+      const seconds = number(retry) ?? (Number.isFinite(Date.parse(retry)) ? Math.max(0, (Date.parse(retry) - Date.now()) / 1000) : 0);
+      h.cooldownUntil = Date.now() + Math.max(Math.min(600, 30 * 2 ** Math.min(h.failures - 1, 5)), seconds) * 1000;
+      h.lastError = status === 429 || status === 402 ? '中转额度不足或请求限流，冷却中' : '中转服务暂不可用，冷却中';
+      this.event('exhaustion', a, h.lastError);
+    }
+    this.state.save();
+  }
+  testRelay(a) {
+    if (this.probes.has(a.id)) return this.probes.get(a.id);
+    const work = (async () => {
+      const start = Date.now();
+      try {
+        const response = await this.authorized(a, a.baseUrl + '/models', 'GET', { accept: 'application/json' });
+        const raw = await buffer(response, 2 * 1024 * 1024), obj = parse(raw);
+        const ok = response.statusCode >= 200 && response.statusCode < 300;
+        if (ok) {
+          const bad = this.health(a).auth || this.health(a).cooldownUntil;
+          this.reset(a); if (bad) this.event('recovery', a, 'Codex 中转已恢复可用');
+        } else this.relayFailure(a, response.statusCode, response.headers);
+        return this.redact({ ok, status: response.statusCode, ms: Date.now() - start,
+          ...(ok ? { models: (Array.isArray(obj?.data) ? obj.data : []).map((m) => m.id).filter((id) => typeof id === 'string').slice(0, 20) } : { error: '中转模型探测失败' }) });
+      } catch {
+        this.relayFailure(a, 502);
+        return { ok: false, status: 502, ms: Date.now() - start, error: '中转连接失败' };
+      }
+    })();
+    this.probes.set(a.id, work); work.finally(() => this.probes.delete(a.id)).catch(() => {});
+    return work;
+  }
   async api(method, parts, body, endpoint) {
     const [route, id, action] = parts;
     if (method === 'GET' && route === 'status') return this.status(endpoint);
-    if (method === 'GET' && route === 'ccswitch') return readCcSwitchCodexAccounts().map((a) => {
+    if (method === 'POST' && route === 'relays') {
+      const a = { id: 'cx_' + randomId(6), type: 'relay', enabled: true, ...this.relayFields(body) };
+      this.accounts.push(a); this.config.save(); return this.view(a);
+    }
+    if (method === 'GET' && route === 'ccswitch') return [...readCcSwitchCodexAccounts().map((a) => {
       const imported = this.accounts.find((x) => x.accountId === a.accountId);
       return { id: a.id, name: a.name, email: a.email, planType: a.planType, accountIdMasked: maskKey(a.accountId),
         isCurrent: a.isCurrent, imported: !!imported, importedAs: imported?.id || null };
-    });
+    }), ...this.relaySources().map(({ apiKey, ...a }) => this.redact({ ...a, keyHint: maskKey(apiKey),
+      imported: this.accounts.some((x) => x.type === 'relay' && x.ccSwitchId === a.id) }, [apiKey]))];
     if (method === 'POST' && route === 'import') {
       if (!Array.isArray(body.ids)) throw fail(400, 'ids must be an array');
       let added = 0, updated = 0;
-      for (const source of readCcSwitchCodexAccounts().filter((a) => body.ids.includes(a.id))) {
+      for (const source of [...readCcSwitchCodexAccounts(), ...this.relaySources().filter((a) => a.importable)].filter((a) => body.ids.includes(a.id))) {
+        if (source.type === 'relay') {
+          let a = this.accounts.find((x) => x.type === 'relay' && x.ccSwitchId === source.id);
+          const fields = this.relayFields(source);
+          if (a) { Object.assign(a, fields); this.reset(a); updated++; }
+          else { a = { id: 'cx_' + randomId(6), type: 'relay', enabled: true, ccSwitchId: source.id, ...fields }; this.accounts.push(a); added++; }
+          continue;
+        }
         let a = this.accounts.find((x) => x.accountId === source.accountId);
         if (a) { if (tokenExp(source.tokens) > tokenExp(a.tokens)) this.adopt(a, source); this.reset(a); updated++; }
-        else { a = { id: 'cx_' + randomId(6), name: source.name, email: source.email, planType: source.planType,
+        else { a = { id: 'cx_' + randomId(6), type: 'chatgpt', name: source.name, email: source.email, planType: source.planType,
           accountId: source.accountId, tokens: source.tokens, enabled: true }; this.accounts.push(a); added++; }
         a.ccSwitchId = source.id;
       }
@@ -408,10 +481,17 @@ class CodexRouter {
     if (route === 'accounts' && id) {
       const a = this.accounts.find((x) => x.id === id);
       if (!a) throw fail(404, 'Account not found');
+      if (a.type === 'relay' && method === 'POST' && ['test', 'usage'].includes(action)) return this.testRelay(a);
       if (method === 'POST' && action === 'usage') return this.usage(a);
       if (method === 'POST' && action === 'reset') { this.reset(a); return this.view(a); }
       if (method === 'POST' && action === 'sync') { this.syncAccount(a); return this.view(a); }
       if (method === 'PATCH' && !action) {
+        if (a.type === 'relay') {
+          const fields = this.relayFields({ ...a, ...body, apiKey: body.apiKey === '' ? a.apiKey : body.apiKey ?? a.apiKey });
+          if ('enabled' in body && typeof body.enabled !== 'boolean') throw fail(400, 'enabled 必须为布尔值');
+          Object.assign(a, fields); if ('enabled' in body) a.enabled = body.enabled;
+          this.reset(a); this.config.save(); return this.view(a);
+        }
         if ('enabled' in body && typeof body.enabled !== 'boolean') throw fail(400, 'enabled must be boolean');
         if ('name' in body && (typeof body.name !== 'string' || !body.name.trim())) throw fail(400, 'name required');
         if ('sync' in body && typeof body.sync !== 'boolean') throw fail(400, 'sync must be boolean');
@@ -440,10 +520,8 @@ class CodexRouter {
       let bodyBuf = await buffer(req), body = parse(bodyBuf);
       if (/^\/codex\/v1\/responses\/?$/.test(url.pathname) && req.method === 'POST') {
         if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail(400, 'Invalid responses JSON');
-        body.store = false; bodyBuf = Buffer.from(JSON.stringify(body));
       }
       row.model = typeof body?.model === 'string' ? body.model : null; row.stream = !!body?.stream;
-      const target = this.upstream + '/' + url.pathname.slice('/codex/v1/'.length) + url.search;
       const attempted = new Set();
       let previous = this.runtime.activeAccountId, reason = '账号切换', stripped = false;
       if (this.configData.mode === 'pinned' && !previous) previous = this.configData.pinnedAccountId;
@@ -462,19 +540,32 @@ class CodexRouter {
         previous = a.id;
         const h = this.health(a); h.lastUsedAt = Date.now(); this.state.save();
         try {
-          let r = await this.authorized(a, target, req.method, req.headers, bodyBuf, controller.signal);
+          const target = (a.type === 'relay' ? a.baseUrl : this.upstream) + '/' + url.pathname.slice('/codex/v1/'.length) + url.search;
+          const attemptBody = () => {
+            if (!/^\/codex\/v1\/responses\/?$/.test(url.pathname) || req.method !== 'POST') return bodyBuf;
+            const next = { ...body };
+            if (a.type === 'relay') { if (a.model) next.model = a.model; }
+            else next.store = false;
+            row.model = typeof next.model === 'string' ? next.model : null;
+            return Buffer.from(JSON.stringify(next));
+          };
+          let r = await this.authorized(a, target, req.method, req.headers, attemptBody(), controller.signal);
           let raw = null;
           if (r.statusCode >= 400) raw = await buffer(r, 4 * 1024 * 1024);
           if (switched && !stripped && r.statusCode === 400 && /encrypted[ _-]content|could not be decrypted|cannot be decrypted/i.test(raw.toString()) && Array.isArray(body?.input)) {
             const input = body.input.filter((item) => !(item?.type === 'reasoning' && item.encrypted_content));
             if (input.length !== body.input.length) {
               stripped = true; body = { ...body, input }; bodyBuf = Buffer.from(JSON.stringify(body));
-              r = await this.authorized(a, target, req.method, req.headers, bodyBuf, controller.signal);
+              r = await this.authorized(a, target, req.method, req.headers, attemptBody(), controller.signal);
               raw = r.statusCode >= 400 ? await buffer(r, 4 * 1024 * 1024) : null;
             }
           }
           const obj = raw && parse(raw), code = obj?.error?.type || obj?.error?.code || '';
           row.attempts.push({ accountId: a.id, status: r.statusCode });
+          const relayQuota = [obj?.error?.type, obj?.error?.code, obj?.error?.message].some((v) => typeof v === 'string' && /usage_limit|usage_not_included|plan_limit|quota|insufficient.*(?:usage|credit|balance)|credit.*exhaust/i.test(v));
+          if (a.type === 'relay' && ([401, 402, 403, 429].includes(r.statusCode) || r.statusCode >= 500 || (r.statusCode >= 400 && relayQuota))) {
+            this.relayFailure(a, r.statusCode, r.headers); reason = '中转暂不可用，切换'; continue;
+          }
           if ([402, 403, 429].includes(r.statusCode) && /usage_limit|usage_not_included|plan_limit|quota|plan.*(?:required|not_supported|not_included)|(?:insufficient|exhausted).*usage/i.test(code)) {
             this.exhaust(a, obj, r.headers); reason = '额度用尽，切换'; continue;
           }
@@ -485,10 +576,23 @@ class CodexRouter {
             h.cooldownUntil = Date.now() + sec * 1000; h.lastError = r.statusCode === 429 ? '请求限流' : '上游服务异常';
             this.state.save(); reason = '上游暂不可用，切换'; continue;
           }
+          // Wait for a body byte (or a clean empty response) before committing relay headers.
+          if (a.type === 'relay' && !raw) {
+            r.setTimeout(Math.max(1, this.config.settings.firstByteTimeoutSec) * 1000);
+            await new Promise((resolve, reject) => {
+              const cleanup = () => { r.off('readable', ready); r.off('end', done); r.off('error', error); r.off('close', closed); };
+              const done = () => { cleanup(); resolve(); };
+              const ready = () => { if (r.readableLength || r.readableEnded || r.complete) done(); };
+              const error = (e) => { cleanup(); reject(e); };
+              const closed = () => r.complete ? done() : error(new Error('Relay closed before first byte'));
+              r.on('readable', ready); r.once('end', done); r.once('error', error); r.once('close', closed); ready();
+            });
+            r.setTimeout(Math.max(1, this.config.settings.idleTimeoutSec) * 1000);
+          }
           row.status = r.statusCode; row.ok = r.statusCode < 400;
           if (row.ok) { this.runtime.activeAccountId = a.id; h.lastError = null; this.state.save(); }
           res.writeHead(r.statusCode, headers(r.headers)); res.flushHeaders();
-          if (raw) return res.end(raw);
+          if (raw) return res.end(a.type === 'relay' ? this.redact(raw.toString('utf8')) : raw);
           if (String(r.headers['content-type']).includes('text/event-stream') || (row.stream && !r.headers['content-type'])) await pipeline(r, new UsageScanner(row), res);
           else {
             // Observe small JSON responses while continuing to forward each chunk immediately.
@@ -503,7 +607,8 @@ class CodexRouter {
           return;
         } catch (e) {
           if (res.headersSent || controller.signal.aborted) throw e;
-          if (!h.auth) { h.cooldownUntil = Date.now() + this.config.settings.cooldownSec * 1000; h.lastError = '上游连接失败'; this.state.save(); }
+          if (a.type === 'relay') this.relayFailure(a, 502);
+          else if (!h.auth) { h.cooldownUntil = Date.now() + this.config.settings.cooldownSec * 1000; h.lastError = '上游连接失败'; this.state.save(); }
           row.attempts.push({ accountId: a.id, status: h.auth ? 401 : 502 }); reason = h.auth ? '认证失败，切换' : '连接失败，切换';
         }
       }
@@ -520,6 +625,7 @@ class CodexRouter {
     } finally {
       res.off('close', abort); this.controllers.delete(controller);
       row.durationMs = Date.now() - row.ts;
+      Object.assign(row, this.redact(row, [], false));
       row.id = this.store.addRequest(row); this.bus.request(row);
     }
   }

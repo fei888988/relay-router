@@ -355,3 +355,18 @@ body.booting .wires .draw { animation-play-state: paused; }
 .cx-sync b { font: 600 11px var(--mono); color: var(--faint); }
 .cx-sync.on b { color: var(--ok); }
 .cx-sync.bad b { color: var(--warn); }
+.cx-facts { grid-column: span 2; display: grid; grid-template-columns: minmax(0,1.4fr) minmax(0,1fr); gap: 14px; align-self: center; }
+.cx-facts > div { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.cx-facts span { font: 600 10px var(--mono); letter-spacing: .14em; color: var(--faint); text-transform: uppercase; }
+.cx-facts b { font-size: 13px; font-weight: 550; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-facts i { font-style: normal; color: var(--muted); }
+.cx-kind { color: var(--sig); border-color: rgba(var(--sig-rgb), .35); }
+.cx-grp { margin-top: 14px; }
+.cx-grp .subhead { display: flex; gap: 8px; align-items: baseline; }
+.cx-opt.no { opacity: .55; cursor: not-allowed; }
+.cx-form .f { margin-bottom: 12px; }
+@media (max-width: 560px) { .cx-facts { grid-column: 1 / -1; } }
+.cx-acc .lane-foot { flex-wrap: wrap; row-gap: 8px; }
+.cx-acc .lane-foot > .btn, .cx-acc .lane-foot > .cx-sync { flex-shrink: 0; }
+.cx-acc .lane-foot > .grow { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 560px) { .cx-acc .lane-foot > .grow { order: 9; flex-basis: 100%; } }

@@ -80,7 +80,7 @@ function counts() {
     requests: [t.total || 0, '个请求（24 小时）'],
     sessions: [st.compaction ? st.compaction.sessions : 0, '个会话有压缩记录'],
     providers: [st.providers.length, '条中转线路'],
-    codex: st.codex ? [st.codex.available, `个账号可用（共 ${st.codex.accounts} 个）`] : null,
+    codex: st.codex ? [st.codex.available, `条线路可用（共 ${st.codex.accounts} 个账号和中转站）`] : null,
     'codex-requests': cxReq == null ? null : [cxReq, '个请求（24 小时）'],
   };
 }

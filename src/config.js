@@ -158,7 +158,7 @@ class Config {
     this.data = { settings, providers: (raw.providers || []).map(normalizeProvider), codex: {
       mode: raw.codex?.mode === 'pinned' ? 'pinned' : 'auto',
       pinnedAccountId: raw.codex?.pinnedAccountId || null,
-      accounts: (raw.codex?.accounts || []).map((a) => ({ ...a, enabled: a.enabled !== false })),
+      accounts: (raw.codex?.accounts || []).map((a) => ({ ...a, type: a.type === 'relay' ? 'relay' : 'chatgpt', enabled: a.enabled !== false })),
     } };
     if (fresh || !raw.settings || !raw.settings.routerKey) this.save();
     return this;

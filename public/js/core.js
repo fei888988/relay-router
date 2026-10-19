@@ -83,7 +83,7 @@ export const APPS = {
   },
   codex: {
     name: 'Codex', code: 'CODEX', pages: [
-      ['codex', '账号', 'grid', 'ACCOUNTS'],
+      ['codex', '号池', 'grid', 'POOL'],
       ['codex-requests', '请求记录', 'list', 'REQUEST LOG'],
       ['codex-events', '事件日志', 'bell', 'TELEMETRY'],
       ['codex-guide', '接入指南', 'book', 'HANDBOOK'],

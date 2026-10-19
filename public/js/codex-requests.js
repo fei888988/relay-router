@@ -5,9 +5,9 @@ import { icon } from './icons.js';
 let rows = [];
 let accounts = [];
 const filters = { ok: '', providerId: '' };
-const RESULT = [['', '全部'], ['0', '失败'], ['failover', '有换号']];
+const RESULT = [['', '全部'], ['0', '失败'], ['failover', '有切换']];
 
-const nameOf = (id) => accounts.find((a) => a.id === id)?.name || id || '无可用账号';
+const nameOf = (id) => accounts.find((a) => a.id === id)?.name || id || '无可用线路';
 const notes = (r) => (r.attempts || []).map((a) => a.note).filter(Boolean);
 
 function rowHtml(r, fresh, i = 0) {
@@ -16,7 +16,7 @@ function rowHtml(r, fresh, i = 0) {
   return `<tr class="click ${fresh ? 'fresh' : ''}" data-id="${r.id}" style="--i:${Math.min(i, 24)}">
     <td class="faint small mono">${fmtTime(r.ts)}</td>
     <td class="small mono">${esc(r.model || '-')}</td>
-    <td>${esc(nameOf(r.provider_id))}${sw.length ? ` <span class="tag" title="${esc(sw.join('；'))}">${icon('shuffle')}换号</span>` : ''}</td>
+    <td>${esc(nameOf(r.provider_id))}${sw.length ? ` <span class="tag" title="${esc(sw.join('；'))}">${icon('shuffle')}切换</span>` : ''}</td>
     <td>${pill(ok ? 'ok' : 'err', r.status || (ok ? 200 : '失败'))}</td>
     <td class="small mono">${fmtMs(r.duration_ms)}</td>
     <td class="small mono">${r.input_tokens != null ? `${fmtK(r.input_tokens)} / ${fmtK(r.output_tokens)}` : '-'}</td>
@@ -31,10 +31,10 @@ export async function render(el) {
     ${pageHead('codex-requests', '<span class="tag" id="cr-count">…</span>')}
     <div class="filters" role="search" data-rv>
       <div class="chips" id="cr-ok">${RESULT.map(([k, v]) => `<button data-v="${k}" class="${filters.ok === k ? 'on' : ''}">${v}</button>`).join('')}</div>
-      <select id="cr-a" aria-label="账号"><option value="">全部账号</option>${accounts.map((a) => `<option value="${esc(a.id)}" ${filters.providerId === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+      <select id="cr-a" aria-label="线路"><option value="">全部账号和中转站</option>${accounts.map((a) => `<option value="${esc(a.id)}" ${filters.providerId === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
     </div>
     <div class="tablebox" data-rv><table>
-      <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>结果</th><th>耗时</th><th>输入 / 输出</th></tr></thead>
+      <thead><tr><th>时间</th><th>模型</th><th>线路</th><th>结果</th><th>耗时</th><th>输入 / 输出</th></tr></thead>
       <tbody id="cr-body" class="stagger"></tbody>
     </table></div>
     <div class="row" style="justify-content:center;margin-top:14px"><button class="btn ghost" id="cr-more">加载更多</button></div>`;
@@ -92,8 +92,8 @@ function detail(r) {
       <dt>tokens</dt><dd>输入 ${fmtK(r.input_tokens)} · 输出 ${fmtK(r.output_tokens)}</dd>
       <dt>耗时</dt><dd>${fmtMs(r.duration_ms)}</dd>
     </dl>
-    ${sw.length ? `<div class="subhead">换号</div>${sw.map((n, i) => `<div class="attempt" style="--i:${i}">${icon('shuffle')} ${esc(n)}</div>`).join('')}` : ''}
-    <div class="subhead">尝试过的账号</div>
+    ${sw.length ? `<div class="subhead">切换</div>${sw.map((n, i) => `<div class="attempt" style="--i:${i}">${icon('shuffle')} ${esc(n)}</div>`).join('')}` : ''}
+    <div class="subhead">尝试过的线路</div>
     ${tries.length ? tries.map((a, i) => `<div class="attempt ${a.status < 400 ? '' : 'bad'}" style="--i:${i}"><div class="row"><b>${i + 1}. ${esc(nameOf(a.accountId))}</b>
       ${a.status < 400 ? '<span class="pill ok">成功</span>' : `<span class="pill err">HTTP ${a.status}</span>`}</div></div>`).join('') : '<p class="muted">无</p>'}`);
 }

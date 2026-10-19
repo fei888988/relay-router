@@ -65,6 +65,11 @@ async function panel(f, endpoint = '/status', method = 'GET', body) {
   return { status: res.status, data: await res.json() };
 }
 const rowFor = async (f, id) => (await panel(f)).data.accounts.find((a) => a.id === id);
+const RELAY_KEY = 'sk-relay-test-secret-9f2c';
+async function addRelay(f, fields = {}) {
+  const result = await panel(f, '/relays', 'POST', { name: 'relay C', baseUrl: process.env.SMART_ROUTER_CODEX_UPSTREAM.replace('/backend-api/codex', '/relay/v1/'), apiKey: RELAY_KEY, ...fields });
+  assert.equal(result.status, 200); return result.data;
+}
 function fixtureDb(f, accounts) {
   const file = path.join(f.dir, 'cc-switch.db');
   const db = new DatabaseSync(file);
@@ -557,4 +562,180 @@ test('a refresh response cannot roll back credentials adopted while its request 
   const response = await request(f); assert.equal(response.status, 200); await response.text();
   assert.deepEqual(f.app.codex.accounts[0].tokens, newest.tokens); assert.deepEqual(dbSettings(f, 'A').auth.tokens, newest.tokens);
   assert.equal(f.calls.filter((c) => c.path === '/oauth/token').length, 1);
+});
+
+test('relay shares account priority, overrides model only for responses, preserves store and client headers', async (t) => {
+  const f = await setup(t, (c, res) => c.headers['chatgpt-account-id']
+    ? json(res, 429, { error: { type: 'usage_limit_reached' } }) : json(res, 200, { model: c.body?.model, usage: { input_tokens: 5, output_tokens: 2 } }));
+  const relay = await addRelay(f, { model: 'relay-model' });
+  assert.deepEqual(f.app.codex.accounts.map((a) => a.type), ['chatgpt', 'chatgpt', 'relay']);
+  assert.equal((await (await request(f, { model: 'client-model', input: 'hi', stream: false, store: true })).json()).model, 'relay-model');
+  assert.deepEqual(f.calls.map((c) => c.headers['chatgpt-account-id'] || 'relay'), ['chatgpt-account-A', 'chatgpt-account-B', 'relay']);
+  const c = f.calls[2];
+  assert.equal(c.path, '/relay/v1/responses'); assert.equal(c.body.store, true);
+  assert.equal(c.headers.authorization, 'Bearer ' + RELAY_KEY); assert.equal(c.headers['chatgpt-account-id'], undefined);
+  const state = (await panel(f)).data, row = state.accounts[2];
+  assert.equal(row.type, 'relay'); assert.equal(row.active, true); assert.equal(row.requests24h, 1); assert.equal(row.stats.inputTokens24h, 5);
+  for (const key of ['usage', 'meters', 'bound', 'sync', 'syncState', 'tokens', 'apiKey']) assert.equal(key in row, false);
+  assert.ok(!JSON.stringify(state).includes(RELAY_KEY)); assert.ok(row.keyHint.includes('9f2c'));
+  assert.equal(f.app.codex.summary().accounts, 3); assert.equal(f.app.codex.summary().available, 1);
+  assert.equal(state.recent[0].accountId, relay.id);
+  await panel(f, '/accounts/' + relay.id, 'PATCH', { model: '' });
+  await request(f, { model: 'client-model', input: 'hi' });
+  assert.equal(f.calls.at(-1).body.model, 'client-model'); assert.equal('store' in f.calls.at(-1).body, false);
+  await fetch(f.base + '/codex/v1/models?x=1', { headers: { authorization: 'Bearer ' + KEY } });
+  assert.equal(f.calls.at(-1).path, '/relay/v1/models?x=1');
+});
+
+for (const failure of [429, 503, 'network', 401, 403, 402, 'quota', 400, 404, 422]) test('relay failover classification: ' + failure, async (t) => {
+  const f = await setup(t, success);
+  const relay = await addRelay(f);
+  await panel(f, '/order', 'PUT', { ids: [relay.id, 'A', 'B'] });
+  f.behavior = (c, res) => {
+    if (c.headers['chatgpt-account-id']) return success(c, res);
+    if (failure === 'network') return res.destroy();
+    json(res, failure === 'quota' ? 400 : failure, { error: { type: 'upstream_error', code: failure === 'quota' ? 'insufficient_quota' : undefined, message: RELAY_KEY } }, { 'retry-after': '90' });
+  };
+  const res = await request(f), body = await res.json();
+  const client = [400, 404, 422].includes(failure);
+  assert.equal(res.status, client ? failure : 200);
+  assert.equal(f.calls.length, client ? 1 : 2);
+  if (!client) assert.equal(body.account, 'chatgpt-account-A');
+  assert.ok(!JSON.stringify(body).includes(RELAY_KEY));
+  const row = await rowFor(f, relay.id);
+  assert.equal(row.status, client ? 'ok' : [401, 403].includes(failure) ? 'auth' : 'cooldown');
+  if (row.status === 'cooldown') assert.ok(row.until > Date.now() + (failure === 'network' ? 28000 : 88000));
+  assert.ok(!JSON.stringify(f.app.store.queryEvents({})).includes(RELAY_KEY));
+  assert.ok(!f.calls.some((c) => /oauth|wham/.test(c.path)));
+});
+
+test('relay cooldown backoff, tick probe recovery, auth persistence and manual test', async (t) => {
+  const f = await setup(t, (c, res) => c.headers['chatgpt-account-id'] ? success(c, res) : json(res, 503, {}));
+  const relay = await addRelay(f);
+  await panel(f, '/settings', 'PUT', { mode: 'pinned', pinnedAccountId: relay.id });
+  await request(f);
+  const a = f.app.codex.accounts.find((a) => a.id === relay.id), h = f.app.codex.health(a);
+  h.cooldownUntil = Date.now() - 1;
+  assert.equal(f.app.codex.statusOf(a), 'cooldown');
+  f.app.codex.tick(); await f.app.codex.probes.get(a.id);
+  assert.ok(h.cooldownUntil > Date.now() + 58000);
+  h.cooldownUntil = Date.now() - 1;
+  f.behavior = (c, res) => json(res, 200, { data: Array.from({ length: 25 }, (_, i) => ({ id: 'model-' + i })) });
+  f.app.codex.tick(); await f.app.codex.probes.get(a.id);
+  assert.equal(f.calls.at(-1).path, '/relay/v1/models'); assert.equal(f.calls.at(-1).headers.authorization, 'Bearer ' + RELAY_KEY);
+  assert.equal(f.app.codex.statusOf(a), 'ok');
+  f.app.codex.relayFailure(a, 401); const before = f.calls.length; f.app.codex.tick();
+  assert.equal(f.calls.length, before); assert.equal(f.app.codex.statusOf(a), 'auth');
+  const probe = (await panel(f, '/accounts/' + a.id + '/test', 'POST', {})).data;
+  assert.equal(probe.ok, true); assert.equal(probe.status, 200); assert.equal(probe.models.length, 20); assert.ok(probe.ms >= 0);
+  assert.equal(f.app.codex.statusOf(a), 'ok');
+  const events = f.app.store.queryEvents({}).map((e) => e.type);
+  for (const type of ['codex_switch', 'codex_exhaustion', 'codex_auth', 'codex_recovery']) assert.ok(events.includes(type));
+});
+
+test('relay timeout before headers or body fails over without committing upstream headers', async (t) => {
+  const f = await setup(t, success, { settings: { firstByteTimeoutSec: 1 } });
+  const relay = await addRelay(f);
+  await panel(f, '/order', 'PUT', { ids: [relay.id, 'A', 'B'] });
+  for (const flush of [false, true]) {
+    await panel(f, '/accounts/' + relay.id + '/reset', 'POST', {});
+    f.behavior = (c, res) => {
+      if (c.headers['chatgpt-account-id']) return success(c, res);
+      if (flush) { res.writeHead(200, { 'content-type': 'text/event-stream', 'x-relay': 'yes' }); res.flushHeaders(); }
+    };
+    const response = await request(f);
+    assert.equal((await response.json()).account, 'chatgpt-account-A'); assert.equal(response.headers.get('x-relay'), null);
+  }
+});
+
+test('encrypted reasoning retry works in both directions across account and relay types', async (t) => {
+  const f = await setup(t, success, { accounts: [account('A')] }); const relay = await addRelay(f);
+  const input = [{ type: 'reasoning', encrypted_content: 'opaque' }, { role: 'user', content: 'hi' }];
+  for (const relayFirst of [false, true]) {
+    for (const a of f.app.codex.accounts) f.app.codex.reset(a);
+    f.app.codex.runtime.activeAccountId = null;
+    await panel(f, '/order', 'PUT', { ids: relayFirst ? [relay.id, 'A'] : ['A', relay.id] });
+    f.behavior = (c, res) => {
+      const isRelay = !c.headers['chatgpt-account-id'];
+      if (isRelay === relayFirst) return json(res, 429, {});
+      if (c.body.input.some((i) => i.encrypted_content)) return json(res, 400, { error: { message: 'encrypted content cannot be decrypted' } });
+      json(res, 200, { ok: true });
+    };
+    const start = f.calls.length;
+    assert.equal((await request(f, { model: 'client', input, store: true })).status, 200);
+    assert.equal(f.calls.length - start, 3); assert.equal(f.calls.at(-1).body.input.length, 1);
+    assert.equal(f.calls.at(-1).body.store, !relayFirst);
+  }
+});
+
+test('relay CRUD validates atomically and supports reset, pin, disable, order and delete', async (t) => {
+  const f = await setup(t);
+  const good = { name: 'relay', baseUrl: 'https://example.invalid/v1///', apiKey: RELAY_KEY };
+  for (const fields of [{ name: '' }, { baseUrl: 'ftp://example.invalid' }, { baseUrl: 'oops' }, { apiKey: '' }, { apiKey: 1 }, { model: 1 }]) {
+    const result = await panel(f, '/relays', 'POST', { ...good, ...fields });
+    assert.equal(result.status, 400); assert.match(result.data.error, /[\u4e00-\u9fff]/);
+  }
+  const relay = await addRelay(f, good); assert.equal(relay.baseUrl, 'https://example.invalid/v1');
+  const id = relay.id, a = f.app.codex.accounts.at(-1);
+  const patch = async (body) => panel(f, '/accounts/' + id, 'PATCH', body);
+  assert.equal((await patch({ name: 'changed', baseUrl: 'bad' })).status, 400); assert.equal(a.name, 'relay');
+  assert.equal((await patch({ enabled: 'no' })).status, 400);
+  f.app.codex.relayFailure(a, 401);
+  assert.equal((await patch({ apiKey: '', model: 'override', name: 'changed' })).data.status, 'ok'); assert.equal(a.apiKey, RELAY_KEY);
+  await patch({ apiKey: 'new-key-secret', enabled: false }); assert.equal((await rowFor(f, id)).status, 'disabled');
+  await patch({ enabled: true }); await panel(f, '/settings', 'PUT', { mode: 'pinned', pinnedAccountId: id });
+  assert.equal(f.app.codex.candidates()[0].id, id);
+  await panel(f, '/accounts/' + id, 'DELETE'); assert.equal(f.app.codex.configData.pinnedAccountId, null);
+  assert.equal(f.app.codex.accounts.length, 2);
+});
+
+test('CC Switch relay TOML import is read-only, filters incompatible/self rows, redacts keys and updates reimports', async (t) => {
+  const f = await setup(t); const file = fixtureDb(f, [account('official')]);
+  const db = new DatabaseSync(file);
+  const stmt = db.prepare('INSERT INTO providers VALUES (?,?,?,?,?)');
+  const add = (id, config, auth = {}, extra = {}) => stmt.run(id, id, 'codex', JSON.stringify({ config, auth, ...extra }), 0);
+  const toml = (base, extra = '') => `model_provider = "custom" # selected\nmodel = 'gpt-relay'\n[model_providers.other]\nbase_url = "https://ignored.invalid"\n[model_providers.custom]\nbase_url = "${base}"\n${extra}`;
+  add('relay', toml('https://example.invalid/v1/', 'wire_api = "responses"\nexperimental_bearer_token = "fallback-key-secret"'), { OPENAI_API_KEY: RELAY_KEY });
+  add('bearer', toml('http://127.0.0.1:2455/backend-api/codex', 'experimental_bearer_token = "bearer-key-secret"'), { OPENAI_API_KEY: '   ' });
+  db.prepare('UPDATE providers SET is_current=1 WHERE id=?').run('relay');
+  add('missing', toml('https://missing.invalid', 'env_key = "UNAVAILABLE_KEY"'));
+  add('manual', toml('https://manual.invalid'), { OPENAI_API_KEY: 'manual-key-secret' }, { requires_manual_auth: true });
+  add('wrong-wire', toml('https://wrong.invalid', 'wire_api = "chat"'), { OPENAI_API_KEY: RELAY_KEY });
+  add('empty-wire', toml('https://wrong.invalid', 'wire_api = ""'), { OPENAI_API_KEY: RELAY_KEY });
+  add('self', toml('http://localhost:18787/codex/v1'), { OPENAI_API_KEY: RELAY_KEY });
+  add('self-ip', toml('http://127.0.0.1:18787/codex'), { OPENAI_API_KEY: RELAY_KEY });
+  add('no-base', 'model_provider = "custom"'); db.close();
+  const before = fs.readFileSync(file);
+  const listing = (await panel(f, '/ccswitch')).data;
+  assert.deepEqual(listing.map((r) => r.id).sort(), ['official', 'relay', 'bearer', 'missing', 'manual'].sort());
+  assert.equal(listing.find((r) => r.id === 'relay').isCurrent, true);
+  assert.equal(listing.find((r) => r.id === 'bearer').isCurrent, false);
+  for (const id of ['missing', 'manual']) { const row = listing.find((r) => r.id === id); assert.equal(row.importable, false); assert.match(row.reason, /[\u4e00-\u9fff]/); }
+  for (const secret of [RELAY_KEY, 'fallback-key-secret', 'bearer-key-secret', 'manual-key-secret']) assert.ok(!JSON.stringify(listing).includes(secret));
+  assert.deepEqual((await panel(f, '/import', 'POST', { ids: listing.map((r) => r.id) })).data, { added: 3, updated: 0 });
+  const a = f.app.codex.accounts.find((r) => r.ccSwitchId === 'relay'); assert.equal(a.apiKey, RELAY_KEY); assert.equal(a.model, 'gpt-relay');
+  assert.equal((await panel(f, '/ccswitch')).data.find((r) => r.id === 'relay').imported, true);
+  assert.deepEqual(fs.readFileSync(file), before);
+  const update = new DatabaseSync(file);
+  update.prepare('UPDATE providers SET settings_config=? WHERE id=?').run(JSON.stringify({ config: toml('https://new.invalid/v1').replace('gpt-relay', 'new-model'), auth: { OPENAI_API_KEY: 'new-import-key-secret' } }), 'relay'); update.close();
+  const changed = fs.readFileSync(file);
+  assert.deepEqual((await panel(f, '/import', 'POST', { ids: ['relay'] })).data, { added: 0, updated: 1 });
+  assert.equal(a.baseUrl, 'https://new.invalid/v1'); assert.equal(a.apiKey, 'new-import-key-secret'); assert.equal(a.model, 'new-model');
+  f.app.codex.syncAll(); await panel(f, '/accounts/' + a.id + '/sync', 'POST', {});
+  assert.deepEqual(fs.readFileSync(file), changed);
+});
+
+test('relay streams without content-type retain usage scanning and empty successes complete', async (t) => {
+  const f = await setup(t, (c, res) => {
+    res.writeHead(200);
+    res.end('data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"output_tokens":4}}}\n\n');
+  }, { accounts: [] });
+  const relay = await addRelay(f);
+  const logged = new Promise((resolve) => f.app.bus.on('push', (m) => { if (m.kind === 'request') resolve(m.data); }));
+  const response = await request(f, { input: 'hi', stream: true });
+  assert.match(await response.text(), /response.completed/);
+  const row = await logged;
+  assert.equal(row.providerId, relay.id); assert.equal(row.inputTokens, 13); assert.equal(row.outputTokens, 4);
+  f.behavior = (c, res) => { res.writeHead(204); res.end(); };
+  assert.equal((await request(f)).status, 204);
 });

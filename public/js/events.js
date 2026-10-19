@@ -3,7 +3,7 @@ import { feedItem } from './overview.js';
 
 // Filter groups shown as chips; each maps to one or more event types.
 const CODEX_GROUPS = [
-  ['', '全部'], ['codex_switch', '换号'], ['codex_exhaustion,codex_recovery', '额度'], ['codex_auth,codex_sync', '登录与同步'],
+  ['', '全部'], ['codex_switch', '切换'], ['codex_exhaustion,codex_recovery', '额度与冷却'], ['codex_auth,codex_sync', '登录与同步'],
 ];
 const CLAUDE_GROUPS = [
   ['', '全部'], ['switch', '切换'], ['down,recover,cooldown', '上下线'], ['compaction,learn', '压缩'], ['probe', '探测'], ['config,settings,mode,reset,model,start', '其他'],
