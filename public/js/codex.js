@@ -63,6 +63,14 @@ function meter(w, fallback) {
 const isRelay = (a) => a.type === 'relay';
 const host = (u) => { try { return new URL(u).host; } catch { return u || ''; } };
 
+async function closeModalAndWait() {
+  const dialog = document.getElementById('modal');
+  if (!dialog?.open) return;
+  const closed = new Promise((resolve) => dialog.addEventListener('close', resolve, { once: true }));
+  closeModal();
+  await closed;
+}
+
 function statusLine(a) {
   if (isRelay(a)) {
     if (a.status === 'cooldown') return a.until ? `暂时不可用，${until(a.until)}后自动重试` : '暂时不可用，稍后自动重试';
@@ -298,6 +306,7 @@ async function onClick(e, el) {
     else if (act === 'delete') {
       if (!(await ask(`从路由移除「${a.name}」？不会影响 CC Switch 里的配置${a.ccSwitchId || !isRelay(a) ? '，之后可以重新导入' : ''}。`, { ok: '移除', danger: true }))) return;
       await api(`codex/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await closeModalAndWait();
     }
     await render(el, { quiet: true });
   });
@@ -314,7 +323,7 @@ function openRename(a, el) {
     if (!name) return;
     await busy(f.querySelector('[type=submit]'), async () => {
       await api(`codex/accounts/${encodeURIComponent(a.id)}`, { method: 'PATCH', body: { name } });
-      closeModal();
+      await closeModalAndWait();
       await render(el, { quiet: true });
     });
   };
@@ -343,7 +352,7 @@ function openRelay(el, a) {
       if (edit) await api(`codex/accounts/${encodeURIComponent(a.id)}`, { method: 'PATCH', body: v });
       else await api('codex/relays', { method: 'POST', body: v });
       toast(edit ? '已保存' : `已添加「${esc(v.name)}」，排在最后`, 'success');
-      closeModal();
+      await closeModalAndWait();
       await render(el, { quiet: true });
     });
   };
@@ -379,12 +388,7 @@ async function openImport(el) {
     await busy(e.target, async () => {
       const r = await api('codex/import', { method: 'POST', body: { ids } });
       toast(`新增 ${r.added || 0} 个，更新 ${r.updated || 0} 个`, 'success');
-      const dialog = document.getElementById('modal');
-      if (dialog?.open) {
-        const closed = new Promise((resolve) => dialog.addEventListener('close', resolve, { once: true }));
-        closeModal();
-        await closed;
-      }
+      await closeModalAndWait();
       await render(el, { quiet: true });
     });
   };
