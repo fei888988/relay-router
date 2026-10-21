@@ -213,7 +213,7 @@ class CodexRouter {
     return { mode: this.configData.mode, pinnedAccountId: this.configData.pinnedAccountId, activeAccountId: this.summary().activeAccountId,
       endpoint, routerKeySet: !!this.config.settings.routerKey, accounts: this.accounts.map((a) => this.view(a, rows)), recent };
   }
-  reset(a) { Object.assign(this.health(a), { auth: false, exhaustedUntil: null, cooldownUntil: null, failures: 0, lastError: null }); this.state.save(); this.bus.stateChanged(); }
+  reset(a) { Object.assign(this.health(a), { auth: false, exhaustedUntil: null, cooldownUntil: null, failures: 0, lastError: null, lastFailure: null }); this.state.save(); this.bus.stateChanged(); }
   adopt(a, source) {
     a.tokens = { ...source.tokens };
     Object.assign(a, codexIdentity(a.tokens));
@@ -293,8 +293,9 @@ class CodexRouter {
     let response = await this.request(url, method, headers(clientHeaders, a), body, signal);
     this.readHeaders(a, response.headers);
     if (response.statusCode === 401) {
+      try { await this.refresh(a, token); }
+      catch { return response; } // Preserve the inference error when token refresh fails.
       response.destroy();
-      await this.refresh(a, token);
       response = await this.request(url, method, headers(clientHeaders, a), body, signal);
       this.readHeaders(a, response.headers);
       if (response.statusCode === 401) this.authFailure(a);
@@ -527,6 +528,7 @@ class CodexRouter {
       }
       row.model = typeof body?.model === 'string' ? body.model : null; row.stream = !!body?.stream;
       const attempted = new Set();
+      let upstreamError = null;
       let previous = this.runtime.activeAccountId, reason = '账号切换', stripped = false;
       if (this.configData.mode === 'pinned' && !previous) previous = this.configData.pinnedAccountId;
       const pinned = this.accounts.find((a) => a.id === this.configData.pinnedAccountId);
@@ -565,9 +567,11 @@ class CodexRouter {
             }
           }
           const obj = raw && parse(raw);
+          if (raw) upstreamError = { status: r.statusCode, headers: headers(r.headers), body: raw };
           row.attempts.push({ accountId: a.id, status: r.statusCode });
           const relayQuota = [obj?.error?.type, obj?.error?.code, obj?.error?.message].some((v) => typeof v === 'string' && /usage_limit|usage_not_included|plan_limit|quota|insufficient.*(?:usage|credit|balance)|credit.*exhaust/i.test(v));
           if (a.type === 'relay' && ([401, 402, 403, 429].includes(r.statusCode) || r.statusCode >= 500 || (r.statusCode >= 400 && relayQuota))) {
+            h.lastFailure = { category: [401, 403].includes(r.statusCode) ? 'auth' : relayQuota || r.statusCode === 402 ? 'quota' : r.statusCode === 429 ? 'rate_limit' : 'upstream', status: r.statusCode, at: Date.now() };
             this.relayFailure(a, r.statusCode, r.headers); reason = '中转暂不可用，切换'; continue;
           }
           const accountQuota = [obj?.error?.type, obj?.error?.code, obj?.error?.message].some((v) => typeof v === 'string' && /usage_limit|usage_not_included|plan_limit|quota|plan.*(?:required|not_supported|not_included)|(?:insufficient|exhausted).*(?:usage|credit|balance)|credit.*exhaust/i.test(v));
@@ -582,6 +586,7 @@ class CodexRouter {
             const retry = r.headers['retry-after'];
             const sec = number(retry) ?? (Number.isFinite(Date.parse(retry)) ? Math.max(0, (Date.parse(retry) - Date.now()) / 1000) : this.config.settings.cooldownSec);
             h.cooldownUntil = Date.now() + sec * 1000; h.lastError = r.statusCode === 429 ? '请求限流' : '上游服务异常';
+            h.lastFailure = { category: r.statusCode === 429 ? 'rate_limit' : 'upstream', status: r.statusCode, at: Date.now() };
             this.state.save(); reason = '上游暂不可用，切换'; continue;
           }
           // Wait for a body byte (or a clean empty response) before committing relay headers.
@@ -600,7 +605,7 @@ class CodexRouter {
           row.status = r.statusCode; row.ok = r.statusCode < 400;
           if (row.ok) { this.runtime.activeAccountId = a.id; h.lastError = null; this.state.save(); }
           res.writeHead(r.statusCode, headers(r.headers)); res.flushHeaders();
-          if (raw) return res.end(a.type === 'relay' ? this.redact(raw.toString('utf8')) : raw);
+          if (raw) return res.end(raw);
           if (String(r.headers['content-type']).includes('text/event-stream') || (row.stream && !r.headers['content-type'])) await pipeline(r, new UsageScanner(row), res);
           else {
             // Observe small JSON responses while continuing to forward each chunk immediately.
@@ -615,16 +620,28 @@ class CodexRouter {
           return;
         } catch (e) {
           if (res.headersSent || controller.signal.aborted) throw e;
+          upstreamError = null;
           if (a.type === 'relay') this.relayFailure(a, 502);
           else if (!h.auth) { h.cooldownUntil = Date.now() + this.config.settings.cooldownSec * 1000; h.lastError = '上游连接失败'; this.state.save(); }
-          row.attempts.push({ accountId: a.id, status: h.auth ? 401 : 502 }); reason = h.auth ? '认证失败，切换' : '连接失败，切换';
+          // Keep a bounded diagnostic code, never raw exceptions that may contain credentials.
+          const code = /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|ERR_STREAM_PREMATURE_CLOSE|ERR_TLS_CERT_ALTNAME_INVALID|CERT_HAS_EXPIRED|DEPTH_ZERO_SELF_SIGNED_CERT)$/.test(e.code) ? e.code : null;
+          h.lastFailure = { category: h.auth ? 'auth' : 'upstream', status: h.auth ? 401 : 502, code, at: Date.now() };
+          this.state.save();
+          const note = (h.auth ? '认证失败' : '上游连接失败') + (code ? ` (${code})` : '');
+          row.attempts.push({ accountId: a.id, status: h.auth ? 401 : 502, note }); reason = h.auth ? '认证失败，切换' : '连接失败，切换';
+          this.event('failure', a, note);
         }
       }
-      row.status = 429; row.providerId = null;
-      const resets = this.accounts.filter((a) => a.enabled && !this.health(a).auth).flatMap((a) => [this.health(a).exhaustedUntil, this.health(a).cooldownUntil]).filter((v) => v > Date.now());
-      const earliest = resets.length ? Math.min(...resets) : null;
-      send(res, 429, { error: { type: 'usage_limit_reached', message: 'No Codex accounts available' + (earliest ? '; earliest reset: ' + new Date(earliest).toISOString() : ''),
-        resets_at: earliest ? Math.ceil(earliest / 1000) : null } });
+      if (upstreamError) {
+        // Failover is exhausted: forward the last upstream response without rewriting it.
+        row.status = upstreamError.status; row.error = 'Upstream request failed';
+        res.writeHead(upstreamError.status, upstreamError.headers);
+        return res.end(upstreamError.body);
+      }
+      // No upstream response exists (connection failure, or no eligible account).
+      row.status = attempted.size ? 502 : 503; row.providerId = null;
+      row.error = attempted.size ? 'Codex upstream connection failed' : 'No Codex accounts currently available';
+      send(res, row.status, { error: { type: attempted.size ? 'router_connection_error' : 'router_unavailable', message: row.error } });
     } catch (e) {
       row.ok = false; row.status = res.headersSent ? row.status : e.status || 502;
       row.error = controller.signal.aborted ? 'Client disconnected' : 'Codex request failed';

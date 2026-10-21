@@ -238,15 +238,57 @@ test('ordinary 400 and same-account encrypted errors pass through without retry'
   assert.equal(r.status, 400); assert.equal((await r.json()).error.type, 'invalid_encrypted_content'); assert.equal(f.calls.length, 1);
 });
 
-test('all exhausted returns 429 with earliest reset and no further upstream calls', async (t) => {
+test('all exhausted forwards the final upstream quota response unchanged', async (t) => {
   const reset = Math.floor(Date.now() / 1000) + 3600;
   const f = await setup(t, (c, r) => json(r, 429, { error: { type: 'usage_limit_reached', resets_at: c.headers['chatgpt-account-id'].endsWith('A') ? reset : reset + 100 } }));
-  for (let i = 0; i < 2; i++) {
-    const r = await request(f); assert.equal(r.status, 429);
-    const obj = await r.json(); assert.equal(obj.error.type, 'usage_limit_reached'); assert.equal(obj.error.resets_at, reset);
-    assert.match(obj.error.message, /earliest reset/);
-  }
+  const r = await request(f); assert.equal(r.status, 429);
+  assert.deepEqual(await r.json(), { error: { type: 'usage_limit_reached', resets_at: reset + 100 } });
+  const cooldown = await request(f); assert.equal(cooldown.status, 503);
+  assert.equal((await cooldown.json()).error.type, 'router_unavailable');
   assert.equal(f.calls.length, 2);
+});
+
+for (const status of [400, 401, 402, 403, 429, 500, 503]) test('forwards original upstream error status, headers and bytes: ' + status, async (t) => {
+  const raw = '  {"error":{"type":"original_upstream_error","code":"original_code","message":"original message"},"extra":true}\n';
+  const f = await setup(t, (c, r) => {
+    if (c.path === '/oauth/token') return json(r, 400, { error: 'invalid_grant' });
+    r.writeHead(status, { 'content-type': 'application/problem+json', 'retry-after': '17', 'x-request-id': 'original-request-id' });
+    r.end(raw);
+  }, { accounts: [account('A')] });
+  const r = await request(f);
+  assert.equal(r.status, status); assert.equal(await r.text(), raw);
+  assert.equal(r.headers.get('content-type'), 'application/problem+json');
+  assert.equal(r.headers.get('retry-after'), '17');
+  assert.equal(r.headers.get('x-request-id'), 'original-request-id');
+});
+
+test('connection failure is local 502 and cooldown is local 503, neither claims quota', async (t) => {
+  const standby = account('B'); standby.enabled = false;
+  const f = await setup(t, (c, r) => r.destroy(), { accounts: [account('A'), standby] });
+  const router = f.app.codex, a = router.accounts[0];
+  router.health(a).usage = { primary: { usedPercent: 40 }, secondary: { usedPercent: 20 } };
+  for (let i = 0; i < 2; i++) {
+    const r = await request(f); const body = await r.json();
+    assert.equal(r.status, i ? 503 : 502);
+    assert.equal(body.error.type, i ? 'router_unavailable' : 'router_connection_error');
+    assert.equal(body.error.resets_at, undefined);
+    assert.doesNotMatch(body.error.message, /quota|earliest reset/);
+  }
+  assert.equal(f.calls.length, 1);
+  assert.equal(router.health(a).usage.primary.usedPercent, 40);
+  const rows = f.app.store.queryRequests({ kind: 'codex' });
+  assert.equal(rows[0].attempts.length, 0);
+  assert.equal(rows[1].attempts[0].status, 502);
+  assert.match(rows[1].attempts[0].note, /ECONNRESET/);
+  router.health(a).cooldownUntil = Date.now() - 1; f.behavior = success;
+  assert.equal((await request(f)).status, 200);
+});
+
+test('empty pool reports local unavailability without claiming an upstream quota error', async (t) => {
+  const f = await setup(t, success, { accounts: [] });
+  const r = await request(f); assert.equal(r.status, 503);
+  assert.equal((await r.json()).error.type, 'router_unavailable');
+  assert.equal(f.calls.length, 0);
 });
 
 test('plain 429, 5xx and network failures cool down and switch; quota header fallback is honored', async (t) => {
@@ -648,7 +690,7 @@ for (const failure of [429, 503, 'network', 401, 403, 402, 'quota', 400, 404, 42
   f.behavior = (c, res) => {
     if (c.headers['chatgpt-account-id']) return success(c, res);
     if (failure === 'network') return res.destroy();
-    json(res, failure === 'quota' ? 400 : failure, { error: { type: 'upstream_error', code: failure === 'quota' ? 'insufficient_quota' : undefined, message: RELAY_KEY } }, { 'retry-after': '90' });
+    json(res, failure === 'quota' ? 400 : failure, { error: { type: 'upstream_error', code: failure === 'quota' ? 'insufficient_quota' : undefined, message: 'original upstream error' } }, { 'retry-after': '90' });
   };
   const res = await request(f), body = await res.json();
   const client = [400, 404, 422].includes(failure);
