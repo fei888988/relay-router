@@ -15,13 +15,14 @@ RelayRouter is a local API router for Claude Code. It connects multiple Anthropi
 ## Requirements
 
 - Node.js **22.5 or later** (uses the built-in SQLite module).
-- No additional npm packages are required.
+- Install npm dependencies before the first run (sharp handles local image optimization).
 
 ## Quick start
 
 From the project directory, run:
 
 ```powershell
+npm install
 npm start
 ```
 

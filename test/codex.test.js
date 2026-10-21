@@ -288,6 +288,60 @@ test('usage endpoint and exhausted prober recover quota without inference; unkno
   assert.ok(f.calls.every((c) => c.path.endsWith('/wham/usage')));
 });
 
+test('healthy and exhausted accounts refresh quota every five minutes, coalescing probes and skipping disabled/auth accounts', async (t) => {
+  const f = await setup(t, (c, r) => {
+    assert.equal(c.path, '/backend-api/wham/usage');
+    json(r, 200, { rate_limit: { allowed: true, primary_window: { used_percent: 25 } } });
+  }, { accounts: ['A', 'B', 'C', 'D'].map((id) => account(id)) });
+  const router = f.app.codex;
+  router.accounts[2].enabled = false;
+  router.health(router.accounts[3]).auth = true;
+  router.health(router.accounts[1]).exhaustedUntil = Date.now() + 3600000;
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const refresh = async () => {
+    router.tick(); router.tick();
+    await Promise.all([...router.probes.values()]);
+  };
+  await refresh();
+  assert.equal(f.calls.length, 2);
+  assert.equal(router.health(router.accounts[0]).usage.primary.usedPercent, 25);
+  assert.equal(router.health(router.accounts[1]).exhaustedUntil, null);
+  assert.equal(router.health(router.accounts[0]).nextProbeAt, now + 300000);
+  now += 299999;
+  await refresh(); assert.equal(f.calls.length, 2);
+  now += 1;
+  await refresh(); assert.equal(f.calls.length, 4);
+});
+
+test('failed quota refresh waits five minutes before retrying', async (t) => {
+  const f = await setup(t, (c, r) => json(r, 503, {}), { accounts: [account('A')] });
+  const router = f.app.codex;
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  router.tick(); await Promise.allSettled([...router.probes.values()]);
+  assert.equal(router.health(router.accounts[0]).nextProbeAt, now + 300000);
+  router.tick(); assert.equal(f.calls.length, 1);
+  now += 300000;
+  router.tick(); await Promise.allSettled([...router.probes.values()]);
+  assert.equal(f.calls.length, 2);
+});
+
+for (const [status, error] of [
+  [403, { type: 'upstream_error', code: 'insufficient_quota' }],
+  [402, { message: 'Insufficient credit balance' }],
+  [400, { type: 'upstream_error', code: 'usage_limit_reached' }],
+  [403, { type: 'upstream_error', code: 'token_expired' }],
+]) test('account failure retries the same request on B: ' + status + ' ' + JSON.stringify(error), async (t) => {
+  const f = await setup(t, (c, r) => c.headers['chatgpt-account-id'].endsWith('A') ? json(r, status, { error }) : success(c, r));
+  const input = { model: 'gpt-test', input: [{ role: 'user', content: 'preserve me' }], stream: false };
+  const res = await request(f, input);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).account, 'chatgpt-account-B');
+  assert.deepEqual(f.calls.map((c) => c.headers['chatgpt-account-id']), ['chatgpt-account-A', 'chatgpt-account-B']);
+  assert.deepEqual(f.calls[1].body.input, input.input);
+  assert.equal((await rowFor(f, 'A')).status, error.code === 'token_expired' ? 'auth' : 'exhausted');
+});
+
 test('panel imports read-only OAuth entries, deduplicates account id, orders and manages accounts with panel protection', async (t) => {
   const f = await setup(t, success, { accounts: [] });
   const a = account('source-A'), b = account('source-B'); fixtureDb(f, [a, b]);

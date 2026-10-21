@@ -6,6 +6,7 @@ const { estimateRequest } = require('./tokens');
 const { truncate } = require('./util');
 const { isClientCompact } = require('./compaction');
 const { UsageRewriter, rewriteJsonUsage } = require('./usage-rewrite');
+const { fitImages, images } = require('./image-budget');
 const { setTimeout: delay } = require('node:timers/promises');
 
 const MAX_BODY = 60 * 1024 * 1024;
@@ -76,7 +77,7 @@ function versionAtLeast(v, min) {
   return true;
 }
 
-// Base64 image/document bytes: these can't be summarized away, only stripped.
+// Media bytes help distinguish byte pressure from a text context overflow.
 function mediaBytes(body) {
   let n = 0;
   const walk = (c) => {
@@ -166,6 +167,7 @@ class Router {
     });
     const fullEst = estimateRequest(body);
     const fullBytes = Buffer.byteLength(JSON.stringify(body));
+    const hasImages = images(body).length > 0;
     const clientCompact = isClientCompact(body);
     const key = this.compactor.sessionKey(body);
     const { list, lastResort } = this.modelCandidates(body.model);
@@ -217,10 +219,10 @@ class Router {
         let sendEst = fullEst;
         const eligible = this.compactor.eligible(p, 'messages', body);
         const ready = s.compaction.enabled ? this.compactor.lookup(key, body) : null;
-        const compactedFailover = !!(!clientCompact && failedOver && s.compaction.enabled && s.compaction.compactOnFailover && ready);
+        const compactedFailover = !!(!hasImages && !clientCompact && failedOver && s.compaction.enabled && s.compaction.compactOnFailover && ready);
         let comp = eligible || compactedFailover ? ready : null;
         const tooBig = this.state.tooBigFor(p, fullEst, fullBytes);
-        if (clientCompact && phase === 'full' && tooBig) {
+        if (clientCompact && phase === 'full' && tooBig && !(hasImages && this.state.tooManyBytes(p, fullBytes))) {
           sizeBlocked = true;
           if (!this.state.tooManyBytes(p, fullBytes)) allBytes = false;
           fullRejected.add(p.id);
@@ -229,7 +231,7 @@ class Router {
           if (sizeHold) break;
           continue;
         }
-        if ((!clientCompact && ((tooBig && comp) || compactedFailover)) || (phase === 'fallback' && comp)) variant = 'compacted';
+        if ((!clientCompact && ((tooBig && comp && !(hasImages && this.state.tooManyBytes(p, fullBytes))) || compactedFailover)) || (phase === 'fallback' && comp)) variant = 'compacted';
         if (phase === 'fallback' && !comp) continue;
 
         let extraRetries = 0;
@@ -244,13 +246,26 @@ class Router {
           }
           if (this.compactor.stripThinking.has(p.id + '|' + key)) sendBody = stripThinking(sendBody);
           if (model !== body.model) sendBody = { ...sendBody, model };
+          const byteLimit = this.state.effectiveByteLimit(p);
+          let imageFit = null;
+          if (byteLimit && images(sendBody).length && Buffer.byteLength(JSON.stringify(sendBody)) > byteLimit * 0.94) {
+            imageFit = await fitImages(sendBody, byteLimit, s.imageCompression, ac.signal);
+            if (ac.signal.aborted) {
+              row.error = '客户端已取消请求';
+              this.finish(row, false);
+              return res.end();
+            }
+            sendBody = imageFit.body;
+            if (imageFit.changed) this.bus.log('info', 'image_compression',
+              `${p.name}：保留全部 ${imageFit.count} 张图片，优化 ${imageFit.changed} 张，请求 ${Math.round(imageFit.before / 1024)} → ${Math.round(imageFit.after / 1024)} KiB`, p.id);
+          }
           sendEst = estimateRequest(sendBody);
           const bodyBuf = Buffer.from(JSON.stringify(sendBody));
           if (this.state.tooManyBytes(p, bodyBuf.length)) {
             sizeBlocked = true;
             attempts.push({ providerId: p.id, variant, skipped: true, sentBytes: bodyBuf.length, reason: '请求体超过已知字节上限' });
             if (clientCompact && phase === 'full') fullRejected.add(p.id);
-            if (eligible && maySchedule) this.compactor.schedule(key, body, p, '请求体超过已知字节上限');
+            if (eligible && maySchedule && !hasImages) this.compactor.schedule(key, body, p, '请求体超过已知字节上限');
             holdSize(p, 'bytes', sendEst, bodyBuf.length);
             failedOver = true;
             break;
@@ -263,6 +278,7 @@ class Router {
             bodyBuf, settings: s, clientSignal: ac.signal,
           });
           const rec = { providerId: p.id, model, variant, sentEst: sendEst, sentBytes: bodyBuf.length, ms: Date.now() - ta };
+          if (imageFit) rec.imageCompression = { before: imageFit.before, after: imageFit.after, changed: imageFit.changed, count: imageFit.count, failed: imageFit.failed };
           if (costRetry) rec.costAwareRetry = extraRetries;
           if (compactedFailover && variant === 'compacted') {
             rec.compactedFailover = row.compactedFailover = true;
@@ -308,6 +324,20 @@ class Router {
           if (sizeError) {
             if (cls.category === 'body_too_large') this.state.learnRejectedBytes(p, bodyBuf.length);
             else this.state.learnRejected(p, sendEst);
+            // First unknown 413: learn, optimize and retry on the same relay before asking the client to recover.
+            if (cls.category === 'body_too_large' && hasImages) {
+              if (tries < s.maxAttempts && s.imageCompression.enabled) {
+                // Re-encode from original pixels, never recompress the previous lossy result.
+                const original = variant === 'compacted' ? this.compactor.apply(body, comp) : body;
+                const fitted = await fitImages(original, bodyBuf.length, s.imageCompression, ac.signal);
+                if (fitted.changed && fitted.after < bodyBuf.length * 0.97) {
+                  rec.next = '保留全部图片，压缩后同线路重试';
+                  continue;
+                }
+              }
+              holdSize(p, 'bytes', sendEst, bodyBuf.length);
+              break;
+            }
             holdSize(p, cls.category === 'body_too_large' ? 'bytes' : 'tokens', sendEst, bodyBuf.length);
             if (clientCompact && phase === 'full') {
               fullRejected.add(p.id);
@@ -373,8 +403,10 @@ class Router {
     // Every provider failed.
     row.error = attempts.filter((a) => !a.skipped).map((a) => `${this.pname(a.providerId)}: ${a.label || a.category}`).join(' → ') || '全部跳过';
     if (sizeHold) return this.replySizeHold(res, row, body, sizeHold);
-    this.finish(row, false, lastFail ? lastFail.r.status : sizeBlocked ? (allBytes ? 413 : 400) : null);
+    this.finish(row, false, allContext && allBytes && hasImages && (lastFail || sizeBlocked)
+      ? 400 : lastFail ? lastFail.r.status : sizeBlocked ? (allBytes ? 413 : 400) : null);
     if (allContext && (lastFail || sizeBlocked)) {
+      if (allBytes && hasImages) return anthropicError(res, 400, 'invalid_request_error', '[智能路由] 全部图片已保留，在当前压缩设置下仍超过可用线路的字节上限。请分批检查图片或选择允许更大请求的线路。');
       if (allBytes) return anthropicError(res, 413, 'request_too_large', '[智能路由] 请求体超过所有可用中转站的字节上限，请执行 /compact 或减少图片及附件。');
       return anthropicError(res, 400, 'invalid_request_error',
         `Prompt is too long: 所有中转站都拒绝了这么长的上下文（约 ${Math.round(fullEst / 1000)}k 估算 tokens）。[智能路由] 请执行 /compact 压缩会话。`);
@@ -397,12 +429,12 @@ class Router {
   replySizeHold(res, row, body, hold) {
     const { p, kind, est, bytes } = hold;
     const name = p.name;
-    if (kind === 'bytes' && bytes && mediaBytes(body) >= bytes * 0.4) {
-      // Mostly images/documents: summarizing can't shrink them; Claude Code strips media on request_too_large.
-      row.error += ` → 已交回客户端（${name} 请求体超限，主要是图片/文档）`;
-      this.finish(row, false, 413);
-      return anthropicError(res, 413, 'request_too_large',
-        `[智能路由] 请求体超过 ${name} 的字节上限（约 ${Math.round(bytes / 1024)} KiB），主要由图片或文档组成，请减少附件。`);
+    if (kind === 'bytes' && bytes && (images(body).length || mediaBytes(body) >= bytes * 0.4)) {
+      // Do not emit request_too_large: Claude can interpret it as permission to strip images.
+      row.error += ` → 图片/附件全部保留，仍超过 ${name} 的字节上限`;
+      this.finish(row, false, 400);
+      return anthropicError(res, 400, 'invalid_request_error',
+        `[智能路由] 已保留全部图片和附件；在当前图片压缩设置下，请求仍超过 ${name} 的字节上限（约 ${Math.round(bytes / 1024)} KiB）。为保留视觉细节，未继续降低清晰度。请把待检查图片分成更小批次，或选择允许更大请求的线路。`);
     }
     const cal = this.state.data.calibration[p.id];
     const ratio = cal && cal.ratio > 0 ? cal.ratio : 1;

@@ -110,6 +110,7 @@ function detail(r) {
       <span class="grow"></span>
       <span class="faint small">${[a.status ? 'HTTP ' + a.status : '', a.sentEst ? '≈' + fmtK(a.sentEst) : '', a.sentBytes != null ? a.sentBytes + ' bytes' : '', a.ms != null ? fmtMs(a.ms) : ''].filter(Boolean).join(' · ')}</span></div>
     ${a.next ? `<div class="small muted" style="margin-top:4px">→ ${esc(a.next)}</div>` : ''}
+    ${a.imageCompression?.changed ? `<div class="small muted" style="margin-top:4px">保留全部 ${a.imageCompression.count} 张图片，优化 ${a.imageCompression.changed} 张 · 请求 ${Math.round(a.imageCompression.before / 1024)} → ${Math.round(a.imageCompression.after / 1024)} KiB</div>` : ''}
     ${a.message ? `<pre>${esc(a.message)}</pre>` : ''}
     ${a.raw && a.raw !== a.message ? `<details style="margin-top:6px"><summary class="small muted">原始响应</summary><pre>${esc(a.raw)}</pre></details>` : ''}
   </div>`).join('');

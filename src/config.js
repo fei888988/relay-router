@@ -54,6 +54,10 @@ const DEFAULT_SETTINGS = {
   // Over a relay's size limit: false = stay on it and hand the request back as "prompt is too long",
   // so the client compacts and keeps the cheap, warm relay; true = fail over to the next relay (cold cache).
   sizeFailover: false,
+  imageCompression: {
+    enabled: true,
+    minLongestEdge: 1024, // floor for automatic resizing; smaller originals are never enlarged
+  },
   // Claude Code at or above this version compacts by itself on "prompt is too long", so the router skips its own summary.
   reactiveCompactMinVersion: '2.1.195',
   costAwareFailover: {
@@ -117,6 +121,10 @@ function normalizeSettings(s) {
   s.costAwareFailover = mergeDefaults(DEFAULT_SETTINGS.costAwareFailover, s.costAwareFailover || {});
   for (const k of ['minTokens', 'extraRetries']) s.costAwareFailover[k] = integer(s.costAwareFailover[k], DEFAULT_SETTINGS.costAwareFailover[k]);
   s.sizeFailover = s.sizeFailover === true;
+  s.imageCompression = mergeDefaults(DEFAULT_SETTINGS.imageCompression, s.imageCompression || {});
+  s.imageCompression.enabled = s.imageCompression.enabled !== false;
+  s.imageCompression.minLongestEdge = Math.min(4096, Math.max(1024,
+    integer(s.imageCompression.minLongestEdge, 1024)));
   s.reactiveCompactMinVersion = /^\d+(\.\d+)*$/.test(String(s.reactiveCompactMinVersion || '').trim())
     ? String(s.reactiveCompactMinVersion).trim() : DEFAULT_SETTINGS.reactiveCompactMinVersion;
   s.compaction.compactOnFailover = s.compaction.compactOnFailover !== false;
@@ -189,7 +197,7 @@ class Config {
     const s = this.data.settings;
     for (const [k, v] of Object.entries(patch || {})) {
       if (['host', 'routerKey'].includes(k)) continue; // changed via dedicated actions only
-      if (k === 'compaction' || k === 'patterns' || k === 'costAwareFailover') s[k] = { ...s[k], ...v };
+      if (['compaction', 'patterns', 'costAwareFailover', 'imageCompression'].includes(k)) s[k] = { ...s[k], ...v };
       else if (k in DEFAULT_SETTINGS) s[k] = v;
     }
     normalizeSettings(s);

@@ -26,10 +26,13 @@ export function render(el) {
           ${num('f.minTokens', '缓存保护起点', s.costAwareFailover.minTokens, { unit: 'tokens', hint: '大请求切到冷缓存前，临时故障优先原线路重试' })}
           ${num('f.extraRetries', '缓存保护额外重试', s.costAwareFailover.extraRetries, { unit: '次', hint: '0 关闭；退避 1.5 秒、4 秒；不占普通最多尝试次数' })}
           ${sw('sizeFailover', '超限时允许切换到更贵的线路', s.sizeFailover)}
-          <span class="hint">关闭时，请求体或上下文超限会留在原线路，交给 Claude Code 自己压缩，不把完整历史发到冷缓存线路</span>
+          <span class="hint">关闭时留在原线路；图片超限先优化图片，文本超限交给 Claude Code 压缩会话</span>
         </div></section>
         <section class="card hud mod" data-rv><div class="card-title"><span class="no">M-02</span><h3>会话压缩</h3></div><div class="fields">
           ${sw('c.enabled', '开启会话压缩', c.enabled)}
+          ${sw('i.enabled', '图片超限时自动优化，保留全部图片', s.imageCompression?.enabled !== false)}
+          ${num('i.minLongestEdge', '自动缩图的长边下限', s.imageCompression?.minLongestEdge || 1024, { unit: '像素', hint: '1024–4096；小图不放大。先无损优化，再逐级调整清晰度，近期图片优先保真；原文件不变' })}
+          <span class="hint">达到清晰度底线仍超限时提示分批检查，不通过删除图片续跑；可关闭图片优化以坚持原图传输</span>
           ${sw('c.compactOnFailover', '切换线路时沿用已有摘要', c.compactOnFailover)}
           <span class="hint">可用于未开启压缩的目标线路以减少缓存写入；客户端 /compact 始终优先完整历史</span>
           ${sw('c.reportFullUsage', '让 Claude Code 照常自动压缩', c.reportFullUsage)}
@@ -70,10 +73,11 @@ export function render(el) {
   };
   form.onsubmit = async (e) => {
     e.preventDefault();
-    const patch = { compaction: {}, costAwareFailover: {}, patterns: {} };
+    const patch = { compaction: {}, costAwareFailover: {}, imageCompression: {}, patterns: {} };
     for (const inp of e.target.querySelectorAll('[name]')) {
       const v = inp.type === 'checkbox' ? inp.checked : inp.type === 'number' ? Number(inp.value) : inp.value;
       if (inp.name.startsWith('c.')) patch.compaction[inp.name.slice(2)] = v;
+      else if (inp.name.startsWith('i.')) patch.imageCompression[inp.name.slice(2)] = v;
       else if (inp.name.startsWith('f.')) patch.costAwareFailover[inp.name.slice(2)] = v;
       else if (inp.name.startsWith('p.')) patch.patterns[inp.name.slice(2)] = String(v).split('\n').map((x) => x.trim()).filter(Boolean);
       else patch[inp.name] = v;

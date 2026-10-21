@@ -11,6 +11,9 @@ const { createApp } = require('../src/server');
 const { isClientCompact, chainHash } = require('../src/compaction');
 const { estimateRequest } = require('../src/tokens');
 const { classify } = require('../src/classify');
+const sharp = require('sharp');
+const { randomBytes } = require('node:crypto');
+const { images } = require('../src/image-budget');
 
 const KEY = 'test-key';
 
@@ -644,33 +647,21 @@ test('[sizeFailover] client /compact continues full-history pass after a context
   } finally { await t.close(); }
 });
 
-test('[sizeFailover] 413 learns byte limits, builds a byte-budgeted tail and compacts subsequent image-heavy requests', async () => {
-  const byteLimit = 180000;
+test('[sizeFailover] unconvertible oversized images fail over intact without summarizing images away', async () => {
   const t = await setup([
-    { name: 'A', behavior: (c) => Buffer.byteLength(JSON.stringify(c.body)) > byteLimit
-      ? { status: 413, raw: '<html>Request Entity Too Large</html>' } : ok(c), provider: { allowCompaction: true } },
-    { name: 'B', behavior: (c) => ok(c, isSummarizer(c) ? 'BYTE-SUMMARY' : 'ok') },
+    { name: 'A', behavior: () => ({ status: 413, raw: 'Request Entity Too Large' }), provider: { allowCompaction: true } },
+    { name: 'B', behavior: ok },
   ], { sizeFailover: true });
   try {
     const body = convo(12);
     body.messages[8].content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'a'.repeat(220000) } });
-    assert.equal((await send(t.base, body)).provider, 'B');
-    const a = t.app.config.provider('A');
-    assert.equal(t.app.state.learned('A').minRejected, undefined, '413 does not teach token rejection');
-    assert.equal(t.app.state.learned('A').minRejectedBytes, Buffer.byteLength(JSON.stringify(body)));
-    assert.equal(t.app.state.tooBigFor(a, 1, Buffer.byteLength(JSON.stringify(body))), true);
-    const key = t.app.compactor.sessionKey(body);
-    await waitFor(() => t.app.compactor.get(key)?.status === 'ready');
-    assert.ok(t.app.compactor.get(key).coveredCount > 8, 'byte-heavy image is summarized out of the tail');
-    assert.equal((await send(t.base, body)).provider, 'A');
-    const sent = t.m.A.calls.at(-1).body;
-    assert.match(JSON.stringify(sent), /BYTE-SUMMARY/);
-    assert.ok(Buffer.byteLength(JSON.stringify(sent)) < byteLimit);
-    assert.equal(t.app.state.learned('A').maxAcceptedBytes, Buffer.byteLength(JSON.stringify(sent)));
-    const rec = t.app.store.queryRequests({ kind: 'messages' })[0].attempts[0];
-    assert.equal(rec.variant, 'compacted');
-    assert.equal(rec.sentBytes, Buffer.byteLength(JSON.stringify(sent)));
-    assert.equal(classify({ status: 413 }, {}).category, 'body_too_large');
+    for (let i = 0; i < 2; i++) {
+      assert.equal((await send(t.base, body)).provider, 'B');
+      assert.deepEqual(t.m.B.calls.at(-1).body.messages, body.messages);
+    }
+    assert.equal(t.m.A.calls.length, 1);
+    assert.equal(t.app.compactor.running.size, 0);
+    assert.equal(t.app.store.queryRequests({ kind: 'compact' }).length, 0);
   } finally { await t.close(); }
 });
 
@@ -803,6 +794,12 @@ test('new cache settings have defaults and normalize nested panel updates', asyn
     assert.equal(s.cacheTtlSec, 0);
     assert.deepEqual(s.costAwareFailover, { minTokens: 100000, extraRetries: 1 });
     assert.equal(s.compaction.compactOnFailover, false);
+    assert.deepEqual(s.imageCompression, { enabled: true, minLongestEdge: 1024 });
+    t.app.config.updateSettings({ imageCompression: { minLongestEdge: 2048 } });
+    t.app.config.updateSettings({ imageCompression: { enabled: false } });
+    assert.deepEqual(s.imageCompression, { enabled: false, minLongestEdge: 2048 });
+    t.app.config.updateSettings({ imageCompression: { minLongestEdge: 1 } });
+    assert.equal(s.imageCompression.minLongestEdge, 1024);
   } finally { await t.close(); }
 });
 
@@ -822,6 +819,41 @@ test('byte-limited text requests answer "prompt is too long" with a token gap, i
 });
 
 const REACTIVE_UA = 'claude-cli/2.1.295 (external, claude-desktop-3p, agent-sdk/0.3.295)';
+
+test('image budget: known limits and first 413 recover on the same relay, including client compact and its next turn', async () => {
+  const png = await sharp(randomBytes(1300 * 900 * 3), { raw: { width: 1300, height: 900, channels: 3 } }).png().toBuffer();
+  const block = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: png.toString('base64') } };
+  const cap = 1100000;
+  for (const known of [false, true]) {
+    const t = await setup([
+      { name: 'A', behavior: (c) => Buffer.byteLength(JSON.stringify(c.body)) > cap ? { status: 413, raw: 'Request Entity Too Large' } : ok(c) },
+      { name: 'B', behavior: ok },
+    ]);
+    try {
+      if (known) t.app.state.learnRejectedBytes(t.app.config.provider('A'), cap);
+      for (const compact of [false, true, false]) {
+        const body = simple({ messages: [{ role: 'user', content: [
+          { type: 'text', text: compact ? 'Your task is to create a detailed summary of the conversation so far.' : 'Inspect this visual design.' },
+          { type: 'tool_result', tool_use_id: 'read-image', content: [block] },
+        ] }] });
+        const snapshot = JSON.stringify(body);
+        const r = await send(t.base, body, { ua: REACTIVE_UA });
+        assert.equal(r.status, 200);
+        assert.equal(r.provider, 'A');
+        assert.equal(JSON.stringify(body), snapshot);
+        const sent = t.m.A.calls.at(-1).body;
+        assert.equal(images(sent).length, 1);
+        assert.ok(Buffer.byteLength(JSON.stringify(sent)) < cap);
+        assert.equal(images(sent)[0].source.media_type, 'image/webp');
+        assert.equal(sent.messages[0].content[1].tool_use_id, 'read-image');
+        const row = t.app.store.queryRequests({ kind: 'messages' })[0];
+        assert.equal(row.attempts.at(-1).imageCompression.changed, 1);
+        assert.equal(row.client_compact, compact ? 1 : 0);
+      }
+      assert.equal(t.m.B.calls.length, 0);
+    } finally { await t.close(); }
+  }
+});
 
 test('size hold: byte 413 stays on the cheap relay, no cold failover and no router summary for reactive Claude Code', async () => {
   const t = await setup([
@@ -873,7 +905,7 @@ test('size hold: older or unknown clients still get a router summary scheduled, 
   } finally { await t.close(); }
 });
 
-test('size hold: media-heavy bodies keep 413 so Claude Code strips images; real outages still fail over', async () => {
+test('size hold: unconvertible media returns an actionable error without asking Claude to strip images; outages still fail over', async () => {
   const t = await setup([
     { name: 'A', behavior: (c) => c.n === 0 ? { status: 413, raw: 'Request Entity Too Large' } : err(503, 'api_error', 'No available accounts') },
     { name: 'B', behavior: (c) => ok(c) },
@@ -882,8 +914,9 @@ test('size hold: media-heavy bodies keep 413 so Claude Code strips images; real 
     const body = convo(5);
     body.messages[2].content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'a'.repeat(200000) } });
     const r = await send(t.base, body, { ua: REACTIVE_UA });
-    assert.equal(r.status, 413);
-    assert.equal(r.json.error.type, 'request_too_large');
+    assert.equal(r.status, 400);
+    assert.equal(r.json.error.type, 'invalid_request_error');
+    assert.match(r.json.error.message, /已保留全部图片/);
     assert.equal(t.m.B.calls.length, 0);
     const r2 = await send(t.base, simple(), { ua: REACTIVE_UA });
     assert.equal(r2.provider, 'B', '503 is a real failure: fail over as before');

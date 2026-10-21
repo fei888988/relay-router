@@ -9,6 +9,7 @@ const { readCcSwitchCodexAccounts, readCcSwitchCodexRelays, jwtPayload, codexIde
 const { tokenExp, writeCcSwitch, readAuthFile, writeAuthFile } = require('./codex-sync');
 const fs = require('node:fs');
 const path = require('node:path');
+const USAGE_REFRESH_MS = 5 * 60 * 1000;
 
 const number = (v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null;
 const expires = (a) => (number(jwtPayload(a.tokens?.access_token).exp) || 0) * 1000;
@@ -320,7 +321,7 @@ class CodexRouter {
     const at = number(error.resets_at ?? error.reset_at), seconds = number(error.resets_in_seconds ?? error.reset_after_seconds);
     const resets = ['primary', 'secondary'].map((k) => number(input['x-codex-' + k + '-reset-after-seconds'])).filter((n) => n !== null);
     h.exhaustedUntil = at !== null ? at * 1000 : Date.now() + (seconds ?? (resets.length ? Math.max(...resets) : 3600)) * 1000;
-    h.lastError = '额度用尽'; h.nextProbeAt = Date.now() + 600000;
+    h.lastError = '额度用尽'; h.nextProbeAt = Date.now() + USAGE_REFRESH_MS;
     this.state.save(); this.event('exhaustion', a, 'Codex 额度用尽');
   }
   usage(a) {
@@ -348,7 +349,10 @@ class CodexRouter {
           if (wasBad) this.event('recovery', a, 'Codex 额度恢复');
         }
         this.state.save(); return this.view(a);
-      } finally { this.health(a).nextProbeAt = Date.now() + 600000; this.state.save(); }
+      } finally {
+        this.health(a).nextProbeAt = Date.now() + USAGE_REFRESH_MS;
+        this.state.save(); this.bus.stateChanged();
+      }
     })();
     this.probes.set(a.id, work);
     work.finally(() => this.probes.delete(a.id)).catch(() => {});
@@ -377,7 +381,7 @@ class CodexRouter {
         if (a.enabled && !h.auth && h.cooldownUntil && h.cooldownUntil <= Date.now()) this.testRelay(a).catch(() => {});
         continue;
       }
-      if (a.enabled && !h.auth && h.exhaustedUntil && (h.nextProbeAt || 0) <= Date.now()) this.usage(a).catch(() => {});
+      if (a.enabled && !h.auth && (h.nextProbeAt || 0) <= Date.now()) this.usage(a).catch(() => {});
     }
   }
   async stop() {
@@ -560,14 +564,18 @@ class CodexRouter {
               raw = r.statusCode >= 400 ? await buffer(r, 4 * 1024 * 1024) : null;
             }
           }
-          const obj = raw && parse(raw), code = obj?.error?.type || obj?.error?.code || '';
+          const obj = raw && parse(raw);
           row.attempts.push({ accountId: a.id, status: r.statusCode });
           const relayQuota = [obj?.error?.type, obj?.error?.code, obj?.error?.message].some((v) => typeof v === 'string' && /usage_limit|usage_not_included|plan_limit|quota|insufficient.*(?:usage|credit|balance)|credit.*exhaust/i.test(v));
           if (a.type === 'relay' && ([401, 402, 403, 429].includes(r.statusCode) || r.statusCode >= 500 || (r.statusCode >= 400 && relayQuota))) {
             this.relayFailure(a, r.statusCode, r.headers); reason = '中转暂不可用，切换'; continue;
           }
-          if ([402, 403, 429].includes(r.statusCode) && /usage_limit|usage_not_included|plan_limit|quota|plan.*(?:required|not_supported|not_included)|(?:insufficient|exhausted).*usage/i.test(code)) {
+          const accountQuota = [obj?.error?.type, obj?.error?.code, obj?.error?.message].some((v) => typeof v === 'string' && /usage_limit|usage_not_included|plan_limit|quota|plan.*(?:required|not_supported|not_included)|(?:insufficient|exhausted).*(?:usage|credit|balance)|credit.*exhaust/i.test(v));
+          if (r.statusCode >= 400 && accountQuota) {
             this.exhaust(a, obj, r.headers); reason = '额度用尽，切换'; continue;
+          }
+          if (r.statusCode === 403 && [obj?.error?.type, obj?.error?.code].some((v) => typeof v === 'string' && /^(?:invalid_token|token_expired|expired_token|authentication_error|invalid_api_key|session_expired|credentials_expired)$/.test(v))) {
+            this.authFailure(a); reason = '认证失败，切换'; continue;
           }
           if (r.statusCode === 401) { reason = '认证失败，切换'; continue; }
           if (r.statusCode === 429 || r.statusCode >= 500) {

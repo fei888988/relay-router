@@ -238,7 +238,7 @@ export async function render(el, { quiet = false } = {}) {
   }
   el.classList.toggle('quiet', quiet);
   const official = cx.accounts.some((a) => !isRelay(a));
-  const acts = `${official ? `<button class="btn" data-act="usage-all">${icon('gauge')}刷新额度</button>` : ''}
+  const acts = `${official ? `<button class="btn" data-act="usage-all" title="已启用账号每 5 分钟自动刷新额度；需要重新登录的账号除外">${icon('gauge')}刷新额度 · 每5分钟自动</button>` : ''}
     <button class="btn" data-act="add-relay">${icon('plus')}添加中转站</button>
     <button class="btn primary" data-act="import">${icon('download')}从 CC Switch 导入</button>`;
   if (!cx.accounts.length) {

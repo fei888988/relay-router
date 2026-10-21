@@ -11,6 +11,9 @@
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/index.js",
-    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 test/router.test.js test/codex.test.js"
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 test/image-budget.test.js test/router.test.js test/codex.test.js"
+  },
+  "dependencies": {
+    "sharp": "^0.35.5"
   }
 }
