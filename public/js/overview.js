@@ -1,7 +1,7 @@
 // Overview: a live signal map. First render builds everything and plays the
 // entrance; later updates (render(el, { quiet: true })) patch in place so
 // counters tween, wires re-colour and in-flight packets keep flying.
-import { store, esc, api, fmtK, fmtTime, empty } from './core.js';
+import { cacheText, sumReported, store, esc, api, fmtK, fmtTime, empty } from './core.js';
 import { icon, LEVEL_ICON } from './icons.js';
 import { providerCard, laneState, onAction } from './pcard.js';
 import { countUp, scramble, reveal } from './fx.js';
@@ -38,10 +38,11 @@ function model(st) {
   const per = Object.fromEntries((st.stats.per || []).filter((x) => x.provider_id).map((x) => [x.provider_id, x]));
   const t = st.stats.totals || {};
   const tok = (st.stats.per || []).reduce((n, x) => n + (x.input_tokens || 0) + (x.output_tokens || 0), 0);
-  const cache = (st.stats.per || []).reduce((n, x) => n + (x.cache_read || 0), 0);
+  const cache = sumReported((st.stats.per || []).map((x) => x.cache_read));
+  const cacheWrite = sumReported((st.stats.per || []).map((x) => x.cache_write));
   const rate = t.total ? (t.ok / t.total) * 100 : null;
   const { hours, by } = hoursAndBy(st);
-  return { cur, pinned, per, t, tok, cache, rate, hours, by };
+  return { cur, pinned, per, t, tok, cache, cacheWrite, rate, hours, by };
 }
 
 function lanesHtml(st, m) {
@@ -112,7 +113,7 @@ function strip(m) {
     ${cell('total', 'activity', 'var(--sig)', '24H 请求', t.total || 0, 'int', `成功 ${t.ok || 0} · 失败 ${(t.total || 0) - (t.ok || 0)}`, 1)}
     ${cell('rate', 'checkCircle', 'var(--ok)', '成功率', m.rate ?? 0, 'pct', m.rate == null ? '还没有请求' : '过去 24 小时', (m.rate || 0) / 100)}
     ${cell('fo', 'shuffle', 'var(--warn)', '自动切换', t.failovers || 0, 'int', `压缩发送 ${t.compacted || 0} 次`, t.total ? (t.failovers || 0) / t.total : 0)}
-    ${cell('tok', 'package', 'var(--info)', 'TOKENS', m.tok, 'k', `缓存命中 ${fmtK(m.cache)}`, m.tok ? m.cache / Math.max(m.tok, m.cache) : 0)}
+    ${cell('tok', 'package', 'var(--info)', 'TOKENS', m.tok, 'k', cacheText(m.cache, m.cacheWrite), m.tok ? m.cache / Math.max(m.tok, m.cache) : 0)}
   </section>`;
 }
 

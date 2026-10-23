@@ -23,9 +23,20 @@ function writeCcSwitch(a, backup) {
   try {
     db.exec('PRAGMA busy_timeout = 5000');
     db.exec('BEGIN IMMEDIATE');
-    const row = db.prepare("SELECT app_type, settings_config FROM providers WHERE id = ? AND app_type = 'codex'").get(a.ccSwitchId);
+    let row;
+    try {
+      row = db.prepare("SELECT app_type, settings_config, meta FROM providers WHERE id = ? AND app_type = 'codex'").get(a.ccSwitchId);
+    } catch {
+      row = db.prepare("SELECT app_type, settings_config FROM providers WHERE id = ? AND app_type = 'codex'").get(a.ccSwitchId);
+    }
     const settings = row && JSON.parse(row.settings_config);
-    if (row?.app_type !== 'codex' || !matchingAuth(settings?.auth, a.accountId)) throw new Error('CC Switch binding changed');
+    let meta = {};
+    try { meta = JSON.parse(row?.meta || '{}'); } catch {}
+    const boundByMeta = meta?.authBinding?.accountId === a.accountId;
+    if (row?.app_type !== 'codex' || (!matchingAuth(settings?.auth, a.accountId) && !boundByMeta)) throw new Error('CC Switch binding changed');
+    if (!settings.auth || typeof settings.auth !== 'object') settings.auth = {};
+    settings.auth.auth_mode = 'chatgpt';
+    if (!settings.auth.tokens || typeof settings.auth.tokens !== 'object') settings.auth.tokens = {};
     let written = false;
     if (tokenExp(a.tokens) > tokenExp(settings.auth.tokens)) {
       backup(file);
@@ -72,3 +83,4 @@ function writeAuthFile(a) {
 }
 
 module.exports = { tokenExp, writeCcSwitch, readAuthFile, writeAuthFile };
+

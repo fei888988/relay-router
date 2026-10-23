@@ -82,11 +82,32 @@ function readCcSwitchCodexAccounts(onError = () => {}, includeIncomplete = false
     const { DatabaseSync } = require('node:sqlite');
     db = new DatabaseSync(file, { readOnly: true });
     const out = [];
-    for (const row of db.prepare("SELECT id, name, settings_config, is_current FROM providers WHERE app_type = 'codex'").all()) {
-      let auth;
+    // Newer CC Switch versions keep managed Codex OAuth credentials in a
+    // separate vault file and leave providers.auth empty.  Read that file
+    // read-only and join it through providers.meta.authBinding.accountId.
+    let managed = {};
+    try {
+      const p = path.join(os.homedir(), '.cc-switch', 'codex_oauth_auth.json');
+      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      managed = data?.accounts && typeof data.accounts === 'object' ? data.accounts : {};
+    } catch {}
+    let rows;
+    try { rows = db.prepare("SELECT id, name, settings_config, meta, is_current FROM providers WHERE app_type = 'codex'").all(); }
+    catch { rows = db.prepare("SELECT id, name, settings_config, is_current FROM providers WHERE app_type = 'codex'").all(); }
+    for (const row of rows) {
+      let settings, auth;
       try { auth = JSON.parse(row.settings_config).auth; } catch { continue; }
-      if (auth?.auth_mode !== 'chatgpt' || !auth.tokens) continue;
-      if (!includeIncomplete && (!auth.tokens.access_token || !auth.tokens.refresh_token)) continue;
+      try { settings = JSON.parse(row.settings_config); } catch { continue; }
+      if (auth?.auth_mode !== 'chatgpt' || !auth.tokens) {
+        let meta = {}; try { meta = JSON.parse(row.meta || '{}'); } catch {}
+        const accountId = meta?.authBinding?.accountId;
+        const saved = accountId && managed[accountId];
+        if (!saved?.refresh_token) continue;
+        auth = { auth_mode: 'chatgpt', tokens: { id_token: saved.id_token || '',
+          access_token: saved.access_token || '', refresh_token: saved.refresh_token,
+          account_id: saved.account_id || accountId } };
+      }
+      if (!includeIncomplete && (!auth.tokens.refresh_token || (!auth.tokens.access_token && !auth.tokens.id_token))) continue;
       const identity = codexIdentity(auth.tokens);
       if (!identity.accountId) continue;
       out.push({ id: row.id, name: row.name, isCurrent: !!row.is_current, ...identity,

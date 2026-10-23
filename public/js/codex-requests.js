@@ -1,5 +1,5 @@
 // Codex request log: every request the router served from an official account, newest first.
-import { store, esc, api, fmtK, fmtMs, fmtTime, modal, empty, pageHead, pill } from './core.js';
+import { cacheText, store, esc, api, fmtK, fmtMs, fmtTime, modal, empty, pageHead, pill } from './core.js';
 import { icon } from './icons.js';
 
 let rows = [];
@@ -20,6 +20,7 @@ function rowHtml(r, fresh, i = 0) {
     <td>${pill(ok ? 'ok' : 'err', r.status || (ok ? 200 : '失败'))}</td>
     <td class="small mono">${fmtMs(r.duration_ms)}</td>
     <td class="small mono">${r.input_tokens != null ? `${fmtK(r.input_tokens)} / ${fmtK(r.output_tokens)}` : '-'}</td>
+    <td class="small mono">${cacheText(r.cache_read, r.cache_write)}</td>
   </tr>`;
 }
 
@@ -34,7 +35,7 @@ export async function render(el) {
       <select id="cr-a" aria-label="线路"><option value="">全部账号和中转站</option>${accounts.map((a) => `<option value="${esc(a.id)}" ${filters.providerId === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
     </div>
     <div class="tablebox" data-rv><table>
-      <thead><tr><th>时间</th><th>模型</th><th>线路</th><th>结果</th><th>耗时</th><th>输入 / 输出</th></tr></thead>
+      <thead><tr><th>时间</th><th>模型</th><th>线路</th><th>结果</th><th>耗时</th><th>输入 / 输出</th><th>缓存命中 / 建立</th></tr></thead>
       <tbody id="cr-body" class="stagger"></tbody>
     </table></div>
     <div class="row" style="justify-content:center;margin-top:14px"><button class="btn ghost" id="cr-more">加载更多</button></div>`;
@@ -63,7 +64,7 @@ export async function render(el) {
 
 function paint(el) {
   const tb = el.querySelector('#cr-body');
-  if (tb) tb.innerHTML = rows.length ? rows.map((r, i) => rowHtml(r, false, i)).join('') : `<tr><td colspan="6">${empty('还没有 Codex 请求')}</td></tr>`;
+  if (tb) tb.innerHTML = rows.length ? rows.map((r, i) => rowHtml(r, false, i)).join('') : `<tr><td colspan="7">${empty('还没有 Codex 请求')}</td></tr>`;
   const c = el.querySelector('#cr-count');
   if (c) c.textContent = `${rows.length} 条`;
 }
@@ -71,7 +72,7 @@ function paint(el) {
 export function onLive(el, r) {
   if (filters.ok || filters.providerId) return;
   const row = { id: r.id, ts: r.ts, kind: r.kind, model: r.model, provider_id: r.providerId, ok: r.ok ? 1 : 0, status: r.status,
-    duration_ms: r.durationMs, input_tokens: r.inputTokens, output_tokens: r.outputTokens, attempts: r.attempts, error: r.error };
+    duration_ms: r.durationMs, input_tokens: r.inputTokens, output_tokens: r.outputTokens, cache_read: r.cacheRead, cache_write: r.cacheWrite, attempts: r.attempts, error: r.error };
   rows.unshift(row);
   const tb = el.querySelector('#cr-body');
   if (!tb) return;
@@ -89,7 +90,7 @@ function detail(r) {
     <dl class="kv">
       <dt>模型</dt><dd>${esc(r.model || '-')}</dd>
       <dt>结果</dt><dd>${r.ok ? `由「${esc(nameOf(r.provider_id))}」完成` : `<span style="color:var(--err)">${esc(r.error || 'HTTP ' + (r.status || '失败'))}</span>`}</dd>
-      <dt>tokens</dt><dd>输入 ${fmtK(r.input_tokens)} · 输出 ${fmtK(r.output_tokens)}</dd>
+      <dt>tokens</dt><dd>输入 ${fmtK(r.input_tokens)}（${cacheText(r.cache_read, r.cache_write)}） · 输出 ${fmtK(r.output_tokens)}</dd>
       <dt>耗时</dt><dd>${fmtMs(r.duration_ms)}</dd>
     </dl>
     ${sw.length ? `<div class="subhead">切换</div>${sw.map((n, i) => `<div class="attempt" style="--i:${i}">${icon('shuffle')} ${esc(n)}</div>`).join('')}` : ''}

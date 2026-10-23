@@ -102,6 +102,7 @@ class Prober {
       ts: t0, kind: 'probe', model, stream: false, estTokens: 20, providerId: p.id, status: r.status || null, ok,
       durationMs: ms, ttfbMs: r.ttfbMs, inputTokens: ok && r.json.usage ? r.json.usage.input_tokens : null,
       outputTokens: ok && r.json.usage ? r.json.usage.output_tokens : null,
+      cacheRead: r.json?.usage?.cache_read_input_tokens, cacheWrite: r.json?.usage?.cache_creation_input_tokens,
       attempts: [{ providerId: p.id, ok, status: r.status || null, category: cls && cls.category, label: cls && cls.label, message: truncate(message, 300), ms }],
       error: ok ? null : `${cls.label}: ${truncate(message, 300)}`,
     });

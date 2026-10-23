@@ -1002,3 +1002,22 @@ test('client abort cancels the cost-aware backoff before another upstream send',
     assert.match(row.error, /取消/);
   } finally { ac.abort(); await t.close(); }
 });
+
+
+test('Anthropic JSON and SSE cache usage reaches request logs and dashboard aggregates', async () => {
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 23 };
+  const fixture = await setup([{ name: 'A', behavior: (ctx) => ctx.body.stream ? {
+    sse: 'event: message_start\ndata: ' + JSON.stringify({ type: 'message_start', message: { usage } }) +
+      '\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":7}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+  } : { json: { type: 'message', content: [{ type: 'text', text: 'ok' }], usage } } }]);
+  try {
+    for (const stream of [false, true]) {
+      await send(fixture.base, simple({ stream }));
+      const row = fixture.app.store.queryRequests({ kind: 'messages' })[0];
+      assert.equal(row.cache_read, 0); assert.equal(row.cache_write, 23);
+      assert.equal(row.input_tokens, 33);
+    }
+    const per = fixture.app.store.stats(0).per[0];
+    assert.equal(per.cache_read, 0); assert.equal(per.cache_write, 46);
+  } finally { await fixture.close(); }
+});

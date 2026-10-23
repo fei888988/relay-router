@@ -1,6 +1,6 @@
 // Codex pool: official ChatGPT accounts and custom relays in one priority order. The router serves
 // Codex from the first member that can take the request and moves on when it runs out or fails.
-import { store, esc, api, toast, busy, modal, closeModal, ask, pill, empty, copy, pageHead, fmtK, fmtMs, fmtTime, fmtAgo } from './core.js';
+import { cacheText, sumReported, store, esc, api, toast, busy, modal, closeModal, ask, pill, empty, copy, pageHead, fmtK, fmtMs, fmtTime, fmtAgo } from './core.js';
 import { icon } from './icons.js';
 import { reveal, countUp } from './fx.js';
 
@@ -108,7 +108,7 @@ function accountCard(a, i, n) {
       <div class="cx-meters">
         ${isRelay(a) ? relayFacts(a) : `${meter(u.primary, '短周期')}${meter(u.secondary, '长周期')}`}
         <div class="cx-stat"><b>${s.requests24h || 0}</b><span>24H 请求</span></div>
-        <div class="cx-stat"><b>${fmtK((s.inputTokens24h || 0) + (s.outputTokens24h || 0))}</b><span>TOKENS</span></div>
+        <div class="cx-stat"><b>${fmtK((s.inputTokens24h || 0) + (s.outputTokens24h || 0))}</b><span>TOKENS</span><div class="small faint" style="margin-top:6px">${cacheText(s.cacheRead24h, s.cacheWrite24h)}</div></div>
       </div>
       ${a.lastError && a.status !== 'ok' ? `<div class="errbox">${icon('alert')}<span>${esc(String(a.lastError.message || a.lastError).slice(0, 160))}</span></div>` : ''}
       <div class="lane-foot">
@@ -190,12 +190,12 @@ function recentCard() {
   const rows = cx.recent || [];
   const nameOf = (id) => cx.accounts.find((a) => a.id === id)?.name || id || '-';
   const body = rows.length
-    ? `<div class="tablebox cx-recent"><table><thead><tr><th>时间</th><th>账号</th><th>模型</th><th>结果</th><th>耗时</th><th>输入 / 输出</th></tr></thead><tbody>
+    ? `<div class="tablebox cx-recent"><table><thead><tr><th>时间</th><th>账号</th><th>模型</th><th>结果</th><th>耗时</th><th>输入 / 输出</th><th>缓存命中 / 建立</th></tr></thead><tbody>
       ${rows.map((r) => {
         const ok = r.status >= 200 && r.status < 400;
         return `<tr><td class="faint small mono">${fmtTime(r.ts)}</td><td>${esc(nameOf(r.accountId))}</td><td class="small mono">${esc(r.model || '-')}</td>
           <td>${pill(ok ? 'ok' : 'err', r.status || '-')}${r.note ? ` <span class="tag" title="${esc(r.note)}">${icon('shuffle')}${esc(r.note.slice(0, 40))}</span>` : ''}</td>
-          <td class="small mono">${fmtMs(r.durationMs)}</td><td class="small mono">${r.inputTokens != null ? `${fmtK(r.inputTokens)} / ${fmtK(r.outputTokens)}` : '-'}</td></tr>`;
+          <td class="small mono">${fmtMs(r.durationMs)}</td><td class="small mono">${r.inputTokens != null ? `${fmtK(r.inputTokens)} / ${fmtK(r.outputTokens)}` : '-'}</td><td class="small mono">${cacheText(r.cacheRead, r.cacheWrite)}</td></tr>`;
       }).join('')}</tbody></table></div>`
     : empty('还没有 Codex 请求。<br>按 <a href="#codex-guide">接入指南</a> 把 Codex 指向路由后，请求会出现在这里。', 'activity');
   return `<section class="card hud" style="margin-top:16px" data-rv><div class="card-title"><h3>最近请求</h3><a href="#codex-requests">查看全部 →</a></div>${body}</section>`;
@@ -212,7 +212,7 @@ function strip() {
   return `<section class="strip cx-strip">
     ${cell('ok', usable ? 'var(--ok)' : 'var(--err)', 'checkCircle', '可用线路', usable, 'int', `共 ${list.length} 个启用`)}
     ${cell('req', 'var(--sig)', 'activity', '24H 请求', req, 'int', '账号与中转站合计')}
-    ${cell('tok', 'var(--info)', 'package', 'TOKENS', tok, 'k', '输入 + 输出')}
+    ${cell('tok', 'var(--info)', 'package', 'TOKENS', tok, 'k', cacheText(sumReported(cx.accounts.map((a) => a.stats?.cacheRead24h)), sumReported(cx.accounts.map((a) => a.stats?.cacheWrite24h))))}
     ${cell('sw', 'var(--warn)', 'shuffle', '切换', switches, 'int', '最近 30 条请求中')}
   </section>`;
 }

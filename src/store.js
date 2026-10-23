@@ -114,7 +114,7 @@ class Store {
           AVG(CASE WHEN ok = 1 THEN duration_ms END) AS avg_ms,
           AVG(CASE WHEN ok = 1 AND stream = 1 THEN ttfb_ms END) AS avg_ttfb,
           SUM(COALESCE(input_tokens,0)) AS input_tokens, SUM(COALESCE(output_tokens,0)) AS output_tokens,
-          SUM(COALESCE(cache_read,0)) AS cache_read, SUM(COALESCE(cache_write,0)) AS cache_write,
+          SUM(cache_read) AS cache_read, SUM(cache_write) AS cache_write,
           SUM(compacted) AS compacted
          FROM requests WHERE ts >= ? AND kind = 'messages' GROUP BY provider_id`
       )

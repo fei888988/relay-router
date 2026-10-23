@@ -419,6 +419,7 @@ class Compactor {
       this.store.addRequest({
         ts: t0, kind: 'compact', model, stream: false, estTokens: est, sentTokens: sentEst,
         inputTokens: usage && usage.input_tokens, outputTokens: usage && usage.output_tokens,
+        cacheRead: usage?.cache_read_input_tokens, cacheWrite: usage?.cache_creation_input_tokens,
         providerId: p.id, status: r.status || null, ok: !!(r.ok && text), durationMs: Date.now() - t0, ttfbMs: r.ttfbMs,
         attempts: [{ providerId: p.id, sentEst, sentBytes: bodyBuf.length, ok: !!(r.ok && text), status: r.status || null, category: r.ok ? null : 'error', ms: Date.now() - t0, message: r.ok ? null : truncate(r.text, 300) }],
         error: r.ok ? null : truncate(r.text, 500),

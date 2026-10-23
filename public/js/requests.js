@@ -1,4 +1,4 @@
-import { store, esc, api, fmtK, fmtMs, fmtTime, pname, modal, empty, pageHead, CATEGORY_TEXT } from './core.js';
+import { cacheText, store, esc, api, fmtK, fmtMs, fmtTime, pname, modal, empty, pageHead, CATEGORY_TEXT } from './core.js';
 import { icon } from './icons.js';
 
 let rows = [];
@@ -24,6 +24,7 @@ function rowHtml(r, fresh, i = 0) {
     <td class="small mono">${ctx}</td>
     <td class="small mono">${durBar(r.duration_ms)}</td>
     <td class="small mono">${r.input_tokens != null ? `${fmtK(r.input_tokens)} / ${fmtK(r.output_tokens)}` : '-'}</td>
+    <td class="small mono">${cacheText(r.cache_read, r.cache_write)}</td>
   </tr>`;
 }
 
@@ -43,7 +44,7 @@ export async function render(el) {
       <label class="search">${icon('search')}<input id="f-q" placeholder="搜索模型或错误" value="${esc(filters.q)}" aria-label="搜索" /></label>
     </div>
     <div class="tablebox" data-rv><table>
-      <thead><tr><th>时间</th><th>模型</th><th>路由</th><th>上下文</th><th>耗时</th><th>输入 / 输出</th></tr></thead>
+      <thead><tr><th>时间</th><th>模型</th><th>路由</th><th>上下文</th><th>耗时</th><th>输入 / 输出</th><th>缓存命中 / 建立</th></tr></thead>
       <tbody id="req-body" class="stagger">${skelRows()}</tbody>
     </table></div>
     <div class="row" style="justify-content:center;margin-top:14px"><button class="btn ghost" id="more">加载更多</button></div>`;
@@ -75,11 +76,11 @@ export async function render(el) {
   await reload();
 }
 
-const skelRows = () => Array.from({ length: 8 }, (_, i) => `<tr style="--i:${i}">${[60, 120, 220, 70, 60, 90].map((w) => `<td><div class="skel" style="width:${w}px"></div></td>`).join('')}</tr>`).join('');
+const skelRows = () => Array.from({ length: 8 }, (_, i) => `<tr style="--i:${i}">${[60, 120, 220, 70, 60, 90, 160].map((w) => `<td><div class="skel" style="width:${w}px"></div></td>`).join('')}</tr>`).join('');
 
 function paint(el) {
   const tb = el.querySelector('#req-body');
-  if (tb) tb.innerHTML = rows.length ? rows.map((r, i) => rowHtml(r, false, i)).join('') : `<tr><td colspan="6">${empty('暂无记录')}</td></tr>`;
+  if (tb) tb.innerHTML = rows.length ? rows.map((r, i) => rowHtml(r, false, i)).join('') : `<tr><td colspan="7">${empty('暂无记录')}</td></tr>`;
   const c = el.querySelector('#req-count');
   if (c) c.textContent = `${rows.length} 条`;
 }
@@ -119,7 +120,7 @@ function detail(r) {
       <dt>模型</dt><dd>${esc(r.model)}${r.stream ? '' : '（非流式）'}</dd>
       <dt>结果</dt><dd>${r.ok ? `由 ${esc(pname(r.provider_id))} 完成` : `<span style="color:var(--err)">${esc(r.error || '失败')}</span>`}</dd>
       <dt>上下文</dt><dd>≈${fmtK(r.est_tokens)}${r.compacted ? `，压缩后发送 ≈${fmtK(r.sent_tokens)}` : ''}</dd>
-      <dt>tokens</dt><dd>输入 ${fmtK(r.input_tokens)}（缓存命中 ${fmtK(r.cache_read)}） · 输出 ${fmtK(r.output_tokens)}</dd>
+      <dt>tokens</dt><dd>输入 ${fmtK(r.input_tokens)}（${cacheText(r.cache_read, r.cache_write)}） · 输出 ${fmtK(r.output_tokens)}</dd>
       <dt>耗时</dt><dd>${fmtMs(r.duration_ms)}${r.ttfb_ms ? `，首字 ${fmtMs(r.ttfb_ms)}` : ''}</dd>
     </dl>
     <div class="subhead">经过的线路</div>${att || '<p class="muted">无</p>'}`);

@@ -88,7 +88,7 @@ test('Codex streams bytes immediately, replaces auth, preserves client headers a
       'x-codex-primary-reset-after-seconds': '120', 'x-codex-secondary-used-percent': 'bad', 'x-codex-plan-type': 'pro' });
     res.write('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n');
     await gate;
-    const final = 'event: response.completed\r\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":42,"output_tokens":9}}}\r\n\r\n';
+    const final = 'event: response.completed\r\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":42,"output_tokens":9,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":5}}}}\r\n\r\n';
     res.write(final.slice(0, 90)); res.end(final.slice(90));
   });
   const logged = new Promise((r) => f.app.bus.on('push', (msg) => { if (msg.kind === 'request') r(msg.data); }));
@@ -101,6 +101,9 @@ test('Codex streams bytes immediately, replaces auth, preserves client headers a
   release(); while (!(await reader.read()).done) {}
   const row = await logged;
   assert.equal(row.kind, 'codex'); assert.equal(row.providerId, 'A'); assert.equal(row.inputTokens, 42); assert.equal(row.outputTokens, 9);
+  assert.equal(row.cacheRead, 30); assert.equal(row.cacheWrite, 5);
+  const saved = f.app.store.queryRequests({ kind: 'codex' })[0];
+  assert.equal(saved.cache_read, 30); assert.equal(saved.cache_write, 5);
   const c = f.calls[0];
   assert.equal(c.path, '/backend-api/codex/responses?x=1'); assert.equal(c.body.store, false); assert.equal(c.body.model, 'exact-model');
   assert.equal(c.headers.authorization, 'Bearer ' + f.app.config.data.codex.accounts[0].tokens.access_token);
@@ -111,6 +114,8 @@ test('Codex streams bytes immediately, replaces auth, preserves client headers a
   assert.equal(status.endpoint, f.base + '/codex/v1'); assert.equal(status.accounts[0].usage.primary.usedPercent, 12.5);
   assert.equal(status.accounts[0].usage.secondary.usedPercent, null); assert.equal(status.accounts[0].planType, 'pro');
   assert.equal(status.accounts[0].stats.inputTokens24h, 42); assert.equal(status.recent[0].outputTokens, 9);
+  assert.equal(status.recent[0].cacheRead, 30); assert.equal(status.recent[0].cacheWrite, 5);
+  assert.equal(status.accounts[0].stats.cacheRead24h, 30); assert.equal(status.accounts[0].stats.cacheWrite24h, 5);
   assert.ok(!JSON.stringify(status).includes('refresh-secret')); assert.ok(!JSON.stringify(status).includes('eyJhbG'));
 });
 
@@ -834,4 +839,30 @@ test('relay streams without content-type retain usage scanning and empty success
   assert.equal(row.providerId, relay.id); assert.equal(row.inputTokens, 13); assert.equal(row.outputTokens, 4);
   f.behavior = (c, res) => { res.writeHead(204); res.end(); };
   assert.equal((await request(f)).status, 204);
+});
+
+
+test('Codex JSON preserves zero, partial and missing cache fields', async (t) => {
+  let usage;
+  const f = await setup(t, (c, res) => json(res, 200, { usage }));
+  for (const [fields, read, write] of [
+    [{ input_tokens_details: { cached_tokens: 0, cache_write_tokens: 12 } }, 0, 12],
+    [{ input_tokens_details: { cached_tokens: 8 } }, 8, null],
+    [{}, null, null],
+    [{ input_tokens_details: { cache_write_tokens: 0 } }, null, 0],
+    [{ cache_read_input_tokens: 3, cache_creation_input_tokens: 4 }, 3, 4],
+  ]) {
+    usage = { input_tokens: 20, output_tokens: 2, ...fields };
+    const logged = new Promise((resolve) => {
+      const handler = (msg) => { if (msg.kind === 'request') { f.app.bus.off('push', handler); resolve(msg.data); } };
+      f.app.bus.on('push', handler);
+    });
+    const res = await request(f);
+    assert.equal(res.status, 200); await res.text(); await logged;
+    const saved = f.app.store.queryRequests({ kind: 'codex' })[0];
+    assert.equal(saved.cache_read, read); assert.equal(saved.cache_write, write);
+    assert.equal(saved.input_tokens, 20);
+  }
+  const stats = (await rowFor(f, 'A')).stats;
+  assert.equal(stats.cacheRead24h, 11); assert.equal(stats.cacheWrite24h, 16);
 });

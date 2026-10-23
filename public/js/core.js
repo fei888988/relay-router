@@ -47,6 +47,13 @@ export function fmtLeft(ts) {
   return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)}:${pad(s % 60)}`;
 }
 export const fmtK = (n) => (n == null ? '-' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(n));
+// Missing upstream fields remain distinct from reported zeroes.
+export const fmtCache = (n) => n == null ? '未返回' : fmtK(n);
+export const cacheText = (read, write) => `缓存命中 ${fmtCache(read)} · 缓存建立 ${fmtCache(write)}`;
+export const sumReported = (values) => {
+  const reported = values.filter((n) => n != null);
+  return reported.length ? reported.reduce((sum, n) => sum + n, 0) : null;
+};
 export const fmtMs = (n) => (n == null ? '-' : n >= 1000 ? (n / 1000).toFixed(1) + 's' : Math.round(n) + 'ms');
 
 const REASONS = { quota: '额度不足', auth: '令牌无效', failures: '连续报错', rate_limit: '频繁限流', manual: '手动下线' };

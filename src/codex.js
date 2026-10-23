@@ -68,6 +68,8 @@ function recordUsage(row, usage) {
   if (!usage) return;
   row.inputTokens = number(usage.input_tokens);
   row.outputTokens = number(usage.output_tokens);
+  row.cacheRead = number(usage.input_tokens_details?.cached_tokens ?? usage.cache_read_input_tokens);
+  row.cacheWrite = number(usage.input_tokens_details?.cache_write_tokens ?? usage.cache_creation_input_tokens);
 }
 
 class CodexRouter {
@@ -194,7 +196,8 @@ class CodexRouter {
     const h = this.health(a), status = this.statusOf(a);
     const source = this.binding(a, rows);
     const stats = this.store.db.prepare(`SELECT COUNT(*) AS requests24h, COALESCE(SUM(input_tokens),0) AS inputTokens24h,
-      COALESCE(SUM(output_tokens),0) AS outputTokens24h FROM requests WHERE kind='codex' AND provider_id=? AND ts>=?`).get(a.id, Date.now() - 86400000);
+      COALESCE(SUM(output_tokens),0) AS outputTokens24h,
+      SUM(cache_read) AS cacheRead24h, SUM(cache_write) AS cacheWrite24h FROM requests WHERE kind='codex' AND provider_id=? AND ts>=?`).get(a.id, Date.now() - 86400000);
     if (a.type === 'relay') return this.redact({ id: a.id, name: a.name, type: 'relay', enabled: a.enabled, status,
       until: h.cooldownUntil || null, reason: h.lastError || null, baseUrl: a.baseUrl, model: a.model || '',
       keyHint: maskKey(a.apiKey), ...(a.ccSwitchId ? { ccSwitchId: a.ccSwitchId } : {}), requests24h: stats.requests24h, stats,
@@ -208,7 +211,7 @@ class CodexRouter {
   status(endpoint) {
     const rows = this.readSyncRows();
     const recent = this.store.queryRequests({ kind: 'codex', limit: 30 }).map((r) => ({ ts: r.ts, accountId: r.provider_id,
-      model: r.model, status: r.status, durationMs: r.duration_ms, inputTokens: r.input_tokens, outputTokens: r.output_tokens,
+      model: r.model, status: r.status, durationMs: r.duration_ms, inputTokens: r.input_tokens, outputTokens: r.output_tokens, cacheRead: r.cache_read, cacheWrite: r.cache_write,
       note: r.attempts.map((x) => x.note).filter(Boolean).join('；') }));
     return { mode: this.configData.mode, pinnedAccountId: this.configData.pinnedAccountId, activeAccountId: this.summary().activeAccountId,
       endpoint, routerKeySet: !!this.config.settings.routerKey, accounts: this.accounts.map((a) => this.view(a, rows)), recent };
